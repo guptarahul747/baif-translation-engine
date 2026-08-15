@@ -650,50 +650,84 @@ tail -f logs/app.log
 
 ## 🚀 Pipeline Execution Guide
 
-### Stage 1 — Speech to Text (ASR)
+### Pre-Pipeline Setup — Download Marathi TTS Model
+
+Before running the complete pipeline, download the Marathi TTS model:
 
 ```bash
-python3 test_whisper_asr.py          # Mac
-python test_whisper_asr.py           # Windows
+python3 setup_marathi_piper.py
 ```
 
-Output: timestamped transcript + `.srt` file in `storage_vault/outputs/`
+> ℹ️ This downloads the Marathi Piper TTS model to `local_model_vault/tts/marathi/`  
+> ⏱️ ~64 MB download · One-time setup
 
 ---
 
-### Stage 2 — Translation (NMT)
+### Generate Final Video — Complete Pipeline Execution
+
+Once all models are downloaded, run these four commands sequentially to generate the final dubbed video with Marathi audio and subtitles:
+
+> 📁 **Sample Video File Location:**  
+> `storage_vault/inputs/SampleVideo.mp4`
+
+#### Command 1: Speech Recognition (ASR)
 
 ```bash
-python3 run_step1_translation.py     # Mac
-python run_step1_translation.py      # Windows
+python3 test_whisper_asr.py storage_vault/inputs/SampleVideo.mp4
 ```
+
+**Input:** `storage_vault/inputs/SampleVideo.mp4`  
+**Output:** `storage_vault/outputs/step1_whisper_output.json`
 
 ---
 
-### Stage 3 — Voice Synthesis (TTS)
+#### Command 2: Machine Translation (NMT)
 
 ```bash
-# Hindi
-python3 run_step2_tts_srt.py         # Mac
-python run_step2_tts_srt.py          # Windows
-
-# Marathi
-python3 run_step2_tts_srt_mr.py      # Mac
-python run_step2_tts_srt_mr.py       # Windows
+python3 run_step1_translation.py storage_vault/outputs/step1_whisper_output.json mr
 ```
 
-Output: `.wav` audio files in `storage_vault/outputs/`
+**Input:** `storage_vault/outputs/step1_whisper_output.json`  
+**Output:** `storage_vault/outputs/step2_offline_translated.json`  
+**Language:** `mr` (Marathi)
 
 ---
 
-### Stage 4 — Video Muxing
+#### Command 3: Text-to-Speech (TTS) — Marathi
 
 ```bash
-python3 test_video_muxing.py         # Mac
-python test_video_muxing.py          # Windows
+python3 run_step2_tts_srt_mr.py storage_vault/outputs/step2_offline_translated.json mr
 ```
 
-Output: dubbed `.mp4` with burned subtitles
+**Input:** `storage_vault/outputs/step2_offline_translated.json`  
+**Output:** 
+- `storage_vault/outputs/audio_segments/` — Individual `.wav` files
+- `storage_vault/outputs/video_subtitles_mr.srt` — Marathi subtitle file
+
+---
+
+#### Command 4: Video Muxing — Final Dubbed Video
+
+```bash
+python3 test_video_muxing.py storage_vault/inputs/SampleVideo.mp4 mr
+```
+
+**Input:** 
+- `storage_vault/inputs/SampleVideo.mp4` — Original video
+- Audio segments and subtitles from Stage 3
+
+**Output:** `storage_vault/outputs/translated_video_mr.mp4` — Final dubbed video with Marathi audio and burned-in subtitles
+
+---
+
+### Complete Pipeline Summary
+
+| Step | Command | Input | Output |
+|------|---------|-------|--------|
+| 1 | `python3 test_whisper_asr.py storage_vault/inputs/SampleVideo.mp4` | Video file | Transcription JSON |
+| 2 | `python3 run_step1_translation.py storage_vault/outputs/step1_whisper_output.json mr` | Transcription | Translated JSON |
+| 3 | `python3 run_step2_tts_srt_mr.py storage_vault/outputs/step2_offline_translated.json mr` | Translation | Audio + SRT file |
+| 4 | `python3 test_video_muxing.py storage_vault/inputs/SampleVideo.mp4 mr` | Video + Audio | Final dubbed video |
 
 ---
 
