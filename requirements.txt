@@ -1,13 +1,26 @@
+# --- Web Interface & API Hosting ---
 streamlit==1.32.0
 fastapi==0.110.0
 uvicorn==0.28.0
 python-multipart==0.0.9
+
+# --- Stage 1: Speech-to-Text (ASR) ---
 faster-whisper==1.0.1
+
+# --- Stage 2: Bidirectional Machine Translation (NMT) ---
 ctranslate2==4.1.0
-huggingface_hub==0.21.4
+transformers>=4.38.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+
+# --- Stage 3: Text-to-Speech & ONNX Runtime (TTS) ---
 sherpa-onnx==1.13.4
+onnx>=1.15.0
+
+# --- Audio & Subtitle Generation ---
 soundfile==0.12.1
-librosa==0.10.1
 srt==3.5.3
-openpyxl==3.1.2
 numpy==1.26.4
+
+# --- Model Provisioning ---
+huggingface_hub==0.21.4
