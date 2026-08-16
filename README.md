@@ -91,38 +91,7 @@ baif-translation-engine/
 
 ---
 
-## 🗂️ Step 0 — Create Project Skeleton
 
-Run once on either platform:
-
-```bash
-# macOS
-mkdir -p baif-translation-engine && cd baif-translation-engine
-mkdir -p app/modules \
-         local_model_vault/whisper \
-         local_model_vault/indictrans2 \
-         local_model_vault/tts/hindi \
-         local_model_vault/tts/marathi \
-         storage_vault/inputs \
-         storage_vault/outputs \
-         logs
-```
-
-```powershell
-# Windows PowerShell
-mkdir baif-translation-engine
-cd baif-translation-engine
-mkdir app\modules, `
-      local_model_vault\whisper, `
-      local_model_vault\indictrans2, `
-      local_model_vault\tts\hindi, `
-      local_model_vault\tts\marathi, `
-      storage_vault\inputs, `
-      storage_vault\outputs, `
-      logs
-```
-
----
 
 ## 🍏 macOS Setup (Apple M4 + Xcode 26)
 
