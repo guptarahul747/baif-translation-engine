@@ -145,10 +145,10 @@ if st.session_state.start_processing:
         progress_bar.progress(0.05)
         
         result = subprocess.run(
-            ["python3", str(BASE_DIR / "test_whisper_asr.py"), str(video_input_path)],
-            capture_output=True,
-            text=True,
-            cwd=str(BASE_DIR)
+        ["python3", str(BASE_DIR / "test_whisper_asr.py"), str(video_input_path), "--lang", src_code],
+        capture_output=True,
+        text=True,
+        cwd=str(BASE_DIR)
         )
         
         logs_dict["stage1"] = result.stdout
@@ -169,11 +169,11 @@ if st.session_state.start_processing:
         progress_bar.progress(0.30)
         
         result = subprocess.run(
-            ["python3", str(BASE_DIR / "run_step1_translation.py"), 
-             str(OUTPUTS_DIR / "step1_whisper_output.json"), tgt_code],
-            capture_output=True,
-            text=True,
-            cwd=str(BASE_DIR)
+        ["python3", str(BASE_DIR / "run_step1_translation.py"), 
+        str(OUTPUTS_DIR / "step1_whisper_output.json"), tgt_code, src_code],
+        capture_output=True,
+        text=True,
+        cwd=str(BASE_DIR)
         )
         
         logs_dict["stage2"] = result.stdout
