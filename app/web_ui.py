@@ -36,6 +36,52 @@ st.set_page_config(
 st.title("🎙️ BAIF Offline Video Translation & Dubbing Engine")
 st.caption("Complete 4-Stage Pipeline: ASR → Translation → TTS → Video Muxing")
 
+def generate_video_summary(translated_json_path: Path, target_lang: str, max_sentences: int = 999) -> Path:
+    """Create the full translated narration for the final dubbed video."""
+    summary_path = translated_json_path.with_name(f"final_video_summary_{target_lang}.txt")
+
+    if not translated_json_path.exists():
+        summary_text = (
+            f"Final dubbed video transcript ({target_lang.upper()}):\n\n"
+            f"No translated segments were found for this video."
+        )
+        summary_path.write_text(summary_text, encoding="utf-8")
+        return summary_path
+
+    try:
+        with open(translated_json_path, "r", encoding="utf-8") as f:
+            segments = json.load(f)
+    except Exception:
+        summary_text = (
+            f"Final dubbed video transcript ({target_lang.upper()}):\n\n"
+            f"No translated segments were found for this video."
+        )
+        summary_path.write_text(summary_text, encoding="utf-8")
+        return summary_path
+
+    texts = []
+    for seg in segments:
+        for key in [f"translation_{target_lang}", "translated_text", "text"]:
+            text = seg.get(key)
+            if isinstance(text, str) and text.strip():
+                texts.append(re.sub(r"\s+", " ", text).strip())
+                break
+
+    if not texts:
+        summary_text = (
+            f"Final dubbed video transcript ({target_lang.upper()}):\n\n"
+            f"No translated segments were found for this video."
+        )
+    else:
+        selected = texts[:max_sentences]
+        summary_text = (
+            f"Final dubbed video transcript ({target_lang.upper()}):\n\n"
+            + "\n".join(f"{idx + 1}. {line}" for idx, line in enumerate(selected))
+        )
+
+    summary_path.write_text(summary_text, encoding="utf-8")
+    return summary_path
+
 # ─────────────────────────────────────────────────────────
 # Sidebar: File Upload & Language Selection
 # ─────────────────────────────────────────────────────────
@@ -93,8 +139,14 @@ with st.sidebar:
     
     # Step 3: Process Button
     st.subheader("3️⃣ Start Pipeline")
+    generate_summary = st.checkbox(
+        "📝 Generate summary for final dubbed video",
+        value=True,
+        help="Create a short summary after the dubbed video is produced."
+    )
     if st.button("🚀 Start Translation & Dubbing", type="primary", disabled=not (video_input_path and can_process), use_container_width=True):
         st.session_state.start_processing = True
+        st.session_state.generate_summary = generate_summary
 
 # ─────────────────────────────────────────────────────────
 # Main Content Area: Processing & Results
@@ -110,6 +162,8 @@ if LANG_MAP[src_lang] == LANG_MAP[tgt_lang]:
 # Initialize session state
 if "start_processing" not in st.session_state:
     st.session_state.start_processing = False
+if "generate_summary" not in st.session_state:
+    st.session_state.generate_summary = True
 
 if st.session_state.start_processing:
     src_code = LANG_MAP[src_lang]
@@ -295,6 +349,13 @@ if st.session_state.start_processing:
 
         progress_bar.progress(stages[3][1])
         status_text.success(f"✅ {stages[3][0]} completed!")
+
+        summary_path = None
+        if st.session_state.generate_summary:
+            status_text.info("⏳ Generating final dubbed video summary...")
+            translated_json = OUTPUTS_DIR / "step2_offline_translated.json"
+            summary_path = generate_video_summary(translated_json, tgt_code)
+            status_text.success("✅ Final summary created!")
         
         # ────────────────────────────────────────────
         # SUCCESS: Display Results
@@ -342,6 +403,21 @@ if st.session_state.start_processing:
                     st.rerun()
             
             st.divider()
+
+            if summary_path and summary_path.exists():
+                st.subheader("📝 Final Dubbed Video Summary")
+                summary_text = summary_path.read_text(encoding="utf-8")
+                st.code(summary_text, language="text")
+                with open(summary_path, "rb") as f:
+                    st.download_button(
+                        label="⬇️ Download Summary",
+                        data=f,
+                        file_name=f"final_summary_{tgt_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain",
+                        use_container_width=True,
+                    )
+
+            st.divider()
             
             # Show output files summary
             st.subheader("📂 Generated Files")
@@ -349,12 +425,13 @@ if st.session_state.start_processing:
                 "🎬 Dubbed Video": final_video_path,
                 "📝 Transcript": OUTPUTS_DIR / "step1_whisper_output.json",
                 "🌐 Translation": OUTPUTS_DIR / "step2_offline_translated.json",
-                "📄 Subtitles": OUTPUTS_DIR / f"video_subtitles_{tgt_code}.srt"
+                "📄 Subtitles": OUTPUTS_DIR / f"video_subtitles_{tgt_code}.srt",
+                "📝 Summary": summary_path
             }
             
             file_count = 0
             for name, path in output_files.items():
-                if path.exists():
+                if path is not None and path.exists():
                     file_count += 1
             
             st.success(f"✅ {file_count} files generated in `storage_vault/outputs/`")
