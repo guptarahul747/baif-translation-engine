@@ -2,11 +2,24 @@ import os
 import sys
 import json
 import shutil
+import ssl
 import tarfile
 import urllib.request
 from pathlib import Path
 import onnx
 from huggingface_hub import snapshot_download, hf_hub_download
+
+
+def build_ssl_context():
+    """Build an SSL context that works even when certifi is not installed."""
+    try:
+        import certifi
+        cafile = certifi.where()
+        if cafile:
+            return ssl.create_default_context(cafile=cafile)
+    except Exception:
+        pass
+    return ssl.create_default_context()
 
 BASE_VAULT = Path(__file__).resolve().parent / "local_model_vault"
 
@@ -73,10 +86,13 @@ def download_universal_espeak(target_dir: Path):
     print("  ↳ 📦 Fetching universal espeak-ng-data archive...")
     archive_path = target_dir / "espeak-ng-data.tar.bz2"
     try:
-        urllib.request.urlretrieve(
+        ssl_context = build_ssl_context()
+        request = urllib.request.Request(
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2",
-            str(archive_path)
+            headers={"User-Agent": "Mozilla/5.0"},
         )
+        with urllib.request.urlopen(request, context=ssl_context, timeout=60) as response, open(archive_path, "wb") as out_file:
+            shutil.copyfileobj(response, out_file)
         with tarfile.open(str(archive_path), "r:bz2") as tar:
             tar.extractall(path=str(target_dir))
         if archive_path.exists():
