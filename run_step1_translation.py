@@ -1,101 +1,305 @@
 import json
 import re
 import sys
+import time
 from pathlib import Path
-import ctranslate2
 
-try:
-    import sentencepiece as spm
-except ImportError:
-    print("❌ 'sentencepiece' missing. Run: pip install sentencepiece")
-    sys.exit(1)
+import ctranslate2
+import sentencepiece as spm
 
 BASE_DIR = Path(__file__).resolve().parent
 VAULT_DIR = BASE_DIR / "local_model_vault" / "indictrans2"
 DEFAULT_INPUT = BASE_DIR / "storage_vault" / "outputs" / "step1_whisper_output.json"
 OUTPUT_JSON = BASE_DIR / "storage_vault" / "outputs" / "step2_offline_translated.json"
 
-FLORES_TAGS = {
+LANG_CODES = {
     "en": "eng_Latn",
     "hi": "hin_Deva",
-    "mr": "mar_Deva"
+    "mr": "mar_Deva",
 }
+SUPPORTED_LANGUAGES = set(LANG_CODES)
+SENTENCE_END_RE = re.compile(r"[.!?।॥][\"'”’)]*$")
 
-def resolve_paths(src_lang: str, tgt_lang: str):
-    """Dynamically routes between en-indic and indic-en/indic-indic model folders."""
-    direction = "en-indic" if src_lang == "en" else ("indic-en" if tgt_lang == "en" else "indic-indic")
-    
-    target_dir = VAULT_DIR / f"{direction}-1b-ct2"
-    if not target_dir.exists():
-        target_dir = VAULT_DIR / direction
-    if not target_dir.exists():
-        target_dir = VAULT_DIR
 
-    model_matches = list(target_dir.rglob("model.bin"))
-    if not model_matches:
-        raise FileNotFoundError(f"Could not find model.bin inside {target_dir}")
-    model_dir = model_matches[0].parent
-
-    spm_matches = list(target_dir.rglob("*.model")) + list(target_dir.rglob("*.SRC")) + list(target_dir.rglob("*.spm"))
-    spm_matches = [f for f in spm_matches if not f.name.endswith((".bin", ".json"))]
-
-    src_spm = next((f for f in spm_matches if "SRC" in f.name or "src" in f.name), spm_matches[0])
-    tgt_spm = next((f for f in spm_matches if "TGT" in f.name or "tgt" in f.name), spm_matches[-1])
-
-    return model_dir, src_spm, tgt_spm
-
-def clean_sentencepiece_text(text: str) -> str:
+def clean_text(text: str) -> str:
     if not text:
         return ""
-    cleaned = text.replace("\u2581", " ").replace("▁", " ")
-    return re.sub(r"\s+", " ", cleaned).strip()
+    text = text.replace("\u2581", " ").replace("▁", " ")
+    return re.sub(r"\s+", " ", text).strip()
 
-def translate_whisper_json(input_json_path: str, src_lang: str = "en", target_lang: str = "hi"):
-    src_tag = FLORES_TAGS.get(src_lang.lower(), "eng_Latn")
-    tgt_tag = FLORES_TAGS.get(target_lang.lower(), "hin_Deva")
+
+def merge_segments_for_translation(
+    segments: list[dict],
+    min_chars_before_sentence_break: int = 90,
+    max_chars: int = 280,
+    max_duration_seconds: float = 18.0,
+) -> list[dict]:
+    """
+    Merge adjacent Whisper fragments into sentence-like chunks before NMT.
+
+    IndicTrans2 generally produces better translations when it receives enough
+    linguistic context. We still keep timestamps by taking the first start and
+    last end time of each merged chunk.
+    """
+    merged: list[dict] = []
+    buffer: list[dict] = []
+
+    def flush():
+        nonlocal buffer
+        if not buffer:
+            return
+
+        source_text = clean_text(" ".join((item.get("text") or "").strip() for item in buffer))
+        if source_text:
+            merged.append(
+                {
+                    "id": len(merged) + 1,
+                    "start": float(buffer[0].get("start", 0.0)),
+                    "end": float(buffer[-1].get("end", buffer[0].get("start", 0.0) + 1.0)),
+                    "text": source_text,
+                    "source_segment_ids": [item.get("id") for item in buffer],
+                }
+            )
+        buffer = []
+
+    for segment in segments:
+        text = clean_text(segment.get("text") or "")
+        if not text:
+            continue
+
+        if not buffer:
+            buffer.append(segment)
+        else:
+            proposed_text = clean_text(
+                " ".join((item.get("text") or "").strip() for item in buffer) + " " + text
+            )
+            proposed_duration = float(segment.get("end", 0.0)) - float(buffer[0].get("start", 0.0))
+
+            if len(proposed_text) > max_chars or proposed_duration > max_duration_seconds:
+                flush()
+            buffer.append(segment)
+
+        current_text = clean_text(" ".join((item.get("text") or "").strip() for item in buffer))
+        current_duration = float(buffer[-1].get("end", 0.0)) - float(buffer[0].get("start", 0.0))
+
+        # Prefer sentence boundaries, but do not translate tiny fragments alone.
+        if (
+            len(current_text) >= min_chars_before_sentence_break
+            and SENTENCE_END_RE.search(current_text)
+        ) or len(current_text) >= max_chars or current_duration >= max_duration_seconds:
+            flush()
+
+    flush()
+    return merged
+
+
+class NativeIndicTranslator:
+    """CTranslate2 + direction-specific SentencePiece tokenizer."""
+
+    def __init__(self, model_dir: Path, name: str):
+        self.model_dir = model_dir
+        self.name = name
+
+        model_bin = model_dir / "model.bin"
+        src_spm = model_dir / "vocab" / "model.SRC"
+        tgt_spm = model_dir / "vocab" / "model.TGT"
+        src_vocab = model_dir / "source_vocabulary.json"
+
+        for path in (model_bin, src_spm, tgt_spm, src_vocab):
+            if not path.exists():
+                raise FileNotFoundError(f"Required translation asset missing: {path}")
+
+        print(f"⏳ Loading {name} CTranslate2 model...", flush=True)
+        t0 = time.perf_counter()
+        self.translator = ctranslate2.Translator(
+            str(model_dir),
+            device="cpu",
+            inter_threads=1,
+            intra_threads=0,
+        )
+        print(f"✅ {name} model loaded in {time.perf_counter() - t0:.2f}s", flush=True)
+
+        self.sp_src = spm.SentencePieceProcessor()
+        self.sp_src.load(str(src_spm))
+        self.sp_tgt = spm.SentencePieceProcessor()
+        self.sp_tgt.load(str(tgt_spm))
+
+        vocab_data = json.loads(src_vocab.read_text(encoding="utf-8"))
+        self.src_vocab = set(vocab_data if isinstance(vocab_data, list) else vocab_data.keys())
+
+    def get_lang_tag(self, language: str) -> str:
+        code = LANG_CODES[language]
+        candidates = [code, f"_{code}_", f"__{code}__", f"__{code}"]
+        return next((candidate for candidate in candidates if candidate in self.src_vocab), code)
+
+    def translate_texts(self, texts: list[str], src_lang: str, tgt_lang: str) -> list[str]:
+        if not texts:
+            return []
+
+        src_tag = self.get_lang_tag(src_lang)
+        tgt_tag = self.get_lang_tag(tgt_lang)
+        tokenized_inputs = []
+
+        for text in texts:
+            pieces = self.sp_src.encode((text or "").strip(), out_type=str)
+            # Match the translation format that passed verify_all_models.py.
+            tokenized_inputs.append([src_tag, tgt_tag] + pieces)
+
+        print(
+            f"🌐 {src_lang.upper()} → {tgt_lang.upper()} | "
+            f"{len(tokenized_inputs)} chunk(s) using {self.name} | beam=5",
+            flush=True,
+        )
+        t0 = time.perf_counter()
+        results = self.translator.translate_batch(
+            tokenized_inputs,
+            beam_size=5,
+            max_decoding_length=256,
+        )
+        print(f"✅ Translation pass finished in {time.perf_counter() - t0:.2f}s", flush=True)
+
+        translations = []
+        known_tags = set(LANG_CODES.values())
+        for result in results:
+            out_tokens = result.hypotheses[0]
+            clean_tokens = []
+            for token in out_tokens:
+                if token in {src_tag, tgt_tag, "<s>", "</s>", "<unk>", "<pad>"}:
+                    continue
+                if token in known_tags:
+                    continue
+                if token.startswith("__") and token.endswith("__"):
+                    continue
+                clean_tokens.append(token)
+
+            translated = self.sp_tgt.decode_pieces(clean_tokens)
+            translations.append(clean_text(translated))
+
+        return translations
+
+
+def build_engines(src_lang: str, tgt_lang: str):
+    en_indic = None
+    indic_en = None
+
+    needs_en_indic = src_lang == "en" or (src_lang in {"hi", "mr"} and tgt_lang in {"hi", "mr"})
+    needs_indic_en = tgt_lang == "en" or (src_lang in {"hi", "mr"} and tgt_lang in {"hi", "mr"})
+
+    if needs_en_indic:
+        en_indic = NativeIndicTranslator(VAULT_DIR / "en-indic", "en-indic")
+    if needs_indic_en:
+        indic_en = NativeIndicTranslator(VAULT_DIR / "indic-en", "indic-en")
+
+    return en_indic, indic_en
+
+
+def translate_texts_all_routes(
+    texts: list[str],
+    src_lang: str,
+    tgt_lang: str,
+    en_indic: NativeIndicTranslator | None,
+    indic_en: NativeIndicTranslator | None,
+) -> list[str]:
+    if src_lang == tgt_lang:
+        return [clean_text(text) for text in texts]
+
+    if src_lang == "en" and tgt_lang in {"hi", "mr"}:
+        return en_indic.translate_texts(texts, "en", tgt_lang)
+
+    if src_lang in {"hi", "mr"} and tgt_lang == "en":
+        return indic_en.translate_texts(texts, src_lang, "en")
+
+    if src_lang in {"hi", "mr"} and tgt_lang in {"hi", "mr"}:
+        print(f"🔁 Pivot route: {src_lang.upper()} → EN → {tgt_lang.upper()}", flush=True)
+        english = indic_en.translate_texts(texts, src_lang, "en")
+        return en_indic.translate_texts(english, "en", tgt_lang)
+
+    raise ValueError(f"Unsupported translation pair: {src_lang} -> {tgt_lang}")
+
+
+def translate_whisper_json(
+    input_json_path: str,
+    src_lang: str = "en",
+    target_lang: str = "hi",
+):
+    src_lang = src_lang.lower()
+    target_lang = target_lang.lower()
+
+    if src_lang not in SUPPORTED_LANGUAGES or target_lang not in SUPPORTED_LANGUAGES:
+        raise ValueError("Supported language codes are: en, hi, mr")
+    if src_lang == target_lang:
+        raise ValueError("Source and target languages must be different")
 
     input_path = Path(input_json_path).resolve()
-    with open(input_path, "r", encoding="utf-8") as f:
-        segments = json.load(f)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input JSON not found: {input_path}")
 
-    model_dir, src_spm_path, tgt_spm_path = resolve_paths(src_lang, target_lang)
-    translator = ctranslate2.Translator(str(model_dir), device="cpu", inter_threads=4)
+    raw_segments = json.loads(input_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_segments, list):
+        raise ValueError("Input JSON must contain a list of transcript segments")
 
-    sp_src = spm.SentencePieceProcessor()
-    sp_src.load(str(src_spm_path))
-    sp_tgt = spm.SentencePieceProcessor()
-    sp_tgt.load(str(tgt_spm_path))
+    print("=" * 64, flush=True)
+    print("🌐 STAGE 2: OFFLINE MACHINE TRANSLATION — QUALITY MODE", flush=True)
+    print("=" * 64, flush=True)
+    print(f"Route requested: {src_lang.upper()} → {target_lang.upper()}", flush=True)
+    print(f"Raw ASR segments: {len(raw_segments)}", flush=True)
 
-    tokenized_inputs, target_prefixes = [], []
-    for seg in segments:
-        subwords = sp_src.encode_as_pieces(seg["text"].strip())
-        formatted_tokens = [src_tag, tgt_tag] + subwords + ["</s>"]
-        tokenized_inputs.append(formatted_tokens)
-        target_prefixes.append([tgt_tag])
+    # Text-input mode writes a single segment; media ASR usually creates many
+    # short fragments, so merge those fragments to give NMT more context.
+    if len(raw_segments) > 1:
+        segments = merge_segments_for_translation(raw_segments)
+    else:
+        segments = raw_segments
 
-    results = translator.translate_batch(
-        tokenized_inputs,
-        target_prefix=target_prefixes,
-        beam_size=5,
-        max_decoding_length=256
+    print(f"Translation chunks after context merge: {len(segments)}", flush=True)
+    for idx, seg in enumerate(segments[:5], start=1):
+        print(f"  SRC[{idx}]: {seg.get('text', '')}", flush=True)
+    if len(segments) > 5:
+        print(f"  ... {len(segments) - 5} more chunk(s)", flush=True)
+
+    texts = [(segment.get("text") or "").strip() for segment in segments]
+    en_indic, indic_en = build_engines(src_lang, target_lang)
+
+    t0 = time.perf_counter()
+    translated_texts = translate_texts_all_routes(
+        texts,
+        src_lang,
+        target_lang,
+        en_indic,
+        indic_en,
     )
 
     translated_segments = []
-    for seg, res in zip(segments, results):
-        clean_tokens = [tok for tok in res.hypotheses[0] if tok not in [src_tag, tgt_tag, "</s>", "<s>", "<unk>"]]
-        translated_text = clean_sentencepiece_text(sp_tgt.decode_pieces(clean_tokens))
-        
-        seg_entry = dict(seg)
-        seg_entry[f"translation_{target_lang}"] = translated_text
-        translated_segments.append(seg_entry)
+    for segment, translated in zip(segments, translated_texts):
+        entry = dict(segment)
+        entry[f"translation_{target_lang}"] = translated
+        entry["translated_text"] = translated
+        translated_segments.append(entry)
+        print(
+            f"  {src_lang.upper()}: {entry.get('text', '')}\n"
+            f"  {target_lang.upper()}: {translated}\n",
+            flush=True,
+        )
 
     OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
-        json.dump(translated_segments, f, ensure_ascii=False, indent=2)
+    OUTPUT_JSON.write_text(
+        json.dumps(translated_segments, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    print(f"✅ Complete route finished in {time.perf_counter() - t0:.2f}s", flush=True)
+    print(f"📄 Output: {OUTPUT_JSON}", flush=True)
+    print("=" * 64, flush=True)
+    return OUTPUT_JSON
+
 
 if __name__ == "__main__":
     input_file = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_INPUT)
     target_language = sys.argv[2] if len(sys.argv) > 2 else "hi"
     source_language = sys.argv[3] if len(sys.argv) > 3 else "en"
-    
-    translate_whisper_json(input_file, src_lang=source_language, target_lang=target_language)   
+
+    translate_whisper_json(
+        input_file,
+        src_lang=source_language,
+        target_lang=target_language,
+    )

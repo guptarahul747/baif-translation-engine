@@ -1,62 +1,90 @@
-import os
-import sys
-import subprocess
 import json
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
-from datetime import datetime
-import streamlit as st
-import platform
+from typing import Optional
 
-# ─────────────────────────────────────────────────────────
-# Configuration & Paths
-# ─────────────────────────────────────────────────────────
+import streamlit as st
+
+# Make project root importable when Streamlit launches this file directly.
 BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from app.modules.database import (  # noqa: E402
+    build_ui_cache_key,
+    compute_file_hash,
+    compute_text_hash,
+    delete_ui_cached_result,
+    get_ui_cached_result,
+    init_db,
+    save_ui_cached_result,
+)
+
 INPUTS_DIR = BASE_DIR / "storage_vault" / "inputs"
 OUTPUTS_DIR = BASE_DIR / "storage_vault" / "outputs"
+CACHE_DIR = BASE_DIR / "storage_vault" / "cache"
+
 INPUTS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+init_db()
+
+PYTHON_BIN = sys.executable
+
+# IMPORTANT: bump this whenever ASR/translation logic or models change enough
+# that old results should not be reused. This prevents returning the earlier
+# low-quality beam_size=1 translations after the quality-first fix.
+PIPELINE_VERSION = "quality-v2-beam5-context"
 
 LANG_MAP = {
     "English": "en",
     "Hindi": "hi",
-    "Marathi": "mr"
+    "Marathi": "mr",
 }
 
-# ─────────────────────────────────────────────────────────
-# Streamlit Page Configuration
-# ─────────────────────────────────────────────────────────
+VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "wmv", "mkv", "flv", "webm"}
+AUDIO_EXTENSIONS = {"mp3", "wav", "aac", "m4a", "flac", "wma", "ogg"}
+MEDIA_EXTENSIONS = sorted(VIDEO_EXTENSIONS | AUDIO_EXTENSIONS)
+
 st.set_page_config(
-    page_title="BAIF Video Dubbing Engine",
+    page_title="BAIF Offline Translation Engine",
     page_icon="🎙️",
     layout="wide",
-    initial_sidebar_state="expanded"
 )
 
-st.title("🎙️ BAIF Offline Video Translation & Dubbing Engine")
-st.caption("Complete 4-Stage Pipeline: ASR → Translation → TTS → Video Muxing")
+st.title("🎙️ BAIF Offline Translation, Dubbing & Summary Engine")
+st.caption(
+    "Offline pipeline: Text/Media → Whisper ASR (when needed) → "
+    "IndicTrans2 → Sherpa-ONNX TTS → SRT/Video → Summary"
+)
+
 
 def summarize_transcript(texts: list[str]) -> str:
-    """Create a dynamic number of concise bullets from the complete narration."""
-    full_text = " ".join(texts)
+    full_text = " ".join(texts).strip()
+    if not full_text:
+        return ""
+
     sentences = [
         sentence.strip()
         for sentence in re.split(r"(?<=[.!?।॥])\s+", full_text)
         if sentence.strip()
     ]
+
     unique_sentences = []
-    seen_sentences = set()
+    seen = set()
     for sentence in sentences:
         normalized = re.sub(r"\s+", " ", sentence).casefold()
-        if normalized not in seen_sentences:
-            seen_sentences.add(normalized)
+        if normalized not in seen:
+            seen.add(normalized)
             unique_sentences.append(sentence)
-    sentences = unique_sentences
 
+    sentences = unique_sentences
     if len(sentences) <= 3:
-        selected_sentences = sentences
+        selected = sentences
     else:
-        # Larger transcripts receive more points, without a fixed maximum.
         summary_count = max(3, round(len(sentences) * 0.4))
         words = re.findall(r"[\w\u0900-\u097F]+", full_text.lower(), flags=re.UNICODE)
         frequencies = {}
@@ -64,462 +92,517 @@ def summarize_transcript(texts: list[str]) -> str:
             if len(word) > 2:
                 frequencies[word] = frequencies.get(word, 0) + 1
 
-        scored_sentences = []
+        scored = []
         for index, sentence in enumerate(sentences):
-            sentence_words = re.findall(r"[\w\u0900-\u097F]+", sentence.lower(), flags=re.UNICODE)
+            sentence_words = re.findall(
+                r"[\w\u0900-\u097F]+", sentence.lower(), flags=re.UNICODE
+            )
             score = sum(frequencies.get(word, 0) for word in sentence_words)
-            scored_sentences.append((score / max(len(sentence_words), 1), index, sentence))
+            scored.append((score / max(len(sentence_words), 1), index, sentence))
 
-        selected_sentences = [
+        selected = [
             sentence
             for _, _, sentence in sorted(
-                sorted(scored_sentences, reverse=True)[:summary_count],
-                key=lambda item: item[1]
+                sorted(scored, reverse=True)[:summary_count],
+                key=lambda item: item[1],
             )
         ]
 
-    return "\n".join(f"- {sentence}" for sentence in selected_sentences)
+    return "\n".join(f"- {sentence}" for sentence in selected)
 
 
-def generate_video_summary(translated_json_path: Path, target_lang: str) -> Path:
-    """Create bullet-point summary from all translated dubbed-video text."""
-    summary_path = translated_json_path.with_name(f"final_video_summary_{target_lang}.txt")
-
-    if not translated_json_path.exists():
-        summary_text = (
-            f"Final dubbed video bullet-point summary ({target_lang.upper()}):\n\n"
-            f"No translated segments were found for this video."
-        )
-        summary_path.write_text(summary_text, encoding="utf-8")
-        return summary_path
-
-    try:
-        with open(translated_json_path, "r", encoding="utf-8") as f:
-            segments = json.load(f)
-    except Exception:
-        summary_text = (
-            f"Final dubbed video bullet-point summary ({target_lang.upper()}):\n\n"
-            f"No translated segments were found for this video."
-        )
-        summary_path.write_text(summary_text, encoding="utf-8")
-        return summary_path
-
+def generate_summary(translated_json: Path, target_lang: str) -> Path:
+    segments = json.loads(translated_json.read_text(encoding="utf-8"))
     texts = []
-    for seg in segments:
-        for key in [f"translation_{target_lang}", "translated_text", "text"]:
-            text = seg.get(key)
-            if isinstance(text, str) and text.strip():
-                texts.append(re.sub(r"\s+", " ", text).strip())
-                break
-
-    if not texts:
-        summary_text = (
-            f"Final dubbed video bullet-point summary ({target_lang.upper()}):\n\n"
-            f"No translated segments were found for this video."
+    for segment in segments:
+        text = (
+            segment.get(f"translation_{target_lang}")
+            or segment.get("translated_text")
+            or segment.get("text")
         )
-    else:
-        summary_text = (
-            f"Final dubbed video bullet-point summary ({target_lang.upper()}):\n\n"
-            + summarize_transcript(texts)
-        )
+        if isinstance(text, str) and text.strip():
+            texts.append(re.sub(r"\s+", " ", text).strip())
 
-    summary_path.write_text(summary_text, encoding="utf-8")
+    summary = summarize_transcript(texts)
+    summary_path = OUTPUTS_DIR / f"final_summary_{target_lang}.txt"
+    summary_path.write_text(
+        f"Summary ({target_lang.upper()}):\n\n{summary or 'No summary available.'}\n",
+        encoding="utf-8",
+    )
     return summary_path
 
-# ─────────────────────────────────────────────────────────
-# Sidebar: File Upload & Language Selection
-# ─────────────────────────────────────────────────────────
+
+def stream_command(command: list[str], title: str, log_placeholder) -> str:
+    """Run a child process and stream combined stdout/stderr into Streamlit."""
+    lines = []
+    process = subprocess.Popen(
+        command,
+        cwd=str(BASE_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+    )
+
+    assert process.stdout is not None
+    for line in iter(process.stdout.readline, ""):
+        line = line.rstrip("\n")
+        lines.append(line)
+        log_placeholder.code("\n".join(lines[-120:]), language="text")
+
+    return_code = process.wait()
+    output = "\n".join(lines)
+    if return_code != 0:
+        raise RuntimeError(f"{title} failed with exit code {return_code}.\n\n{output}")
+    return output
+
+
+def save_text_as_segments(text: str) -> Path:
+    output = OUTPUTS_DIR / "step1_whisper_output.json"
+    output.write_text(
+        json.dumps(
+            [{"id": 1, "start": 0.0, "end": 1.0, "text": text.strip()}],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return output
+
+
+def copy_if_exists(source: Optional[Path], destination: Path) -> Optional[Path]:
+    if source is None or not source.exists():
+        return None
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return destination
+
+
+def cache_path_to_db(path: Optional[Path]) -> Optional[str]:
+    """Store paths relative to project root so the Desktop repo is portable."""
+    if path is None:
+        return None
+    try:
+        return str(path.resolve().relative_to(BASE_DIR.resolve()))
+    except ValueError:
+        return str(path.resolve())
+
+
+def db_path_to_path(value: Optional[str]) -> Optional[Path]:
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+def cache_entry_is_usable(
+    cached: dict,
+    *,
+    require_tts: bool,
+    require_summary: bool,
+    require_video: bool,
+) -> bool:
+    translated = db_path_to_path(cached.get("translated_json_path"))
+    if translated is None or not translated.exists():
+        return False
+
+    if require_tts:
+        audio = db_path_to_path(cached.get("audio_path"))
+        srt = db_path_to_path(cached.get("srt_path"))
+        if audio is None or not audio.exists() or srt is None or not srt.exists():
+            return False
+
+    if require_summary:
+        summary = db_path_to_path(cached.get("summary_path"))
+        if summary is None or not summary.exists():
+            return False
+
+    if require_video:
+        video = db_path_to_path(cached.get("video_path"))
+        if video is None or not video.exists():
+            return False
+
+    return True
+
+
+def render_results(
+    *,
+    translated_json: Path,
+    target_lang: str,
+    generate_tts: bool,
+    audio_path: Optional[Path],
+    srt_path: Optional[Path],
+    summary_path: Optional[Path],
+    final_video: Optional[Path],
+    cache_hit: bool,
+) -> None:
+    if cache_hit:
+        st.success("🎯 Cache hit — reused the previously completed result. No ASR/translation/TTS was rerun.")
+
+    segments = json.loads(translated_json.read_text(encoding="utf-8"))
+    translated_texts = [
+        segment.get(f"translation_{target_lang}")
+        or segment.get("translated_text")
+        or ""
+        for segment in segments
+    ]
+
+    st.subheader("🌐 Translated Text")
+    st.text_area(
+        "Translation",
+        value="\n".join(text for text in translated_texts if text),
+        height=220,
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.download_button(
+            "⬇️ Translation JSON",
+            data=translated_json.read_bytes(),
+            file_name=translated_json.name,
+            mime="application/json",
+        )
+    with col2:
+        if generate_tts and audio_path and audio_path.exists():
+            st.download_button(
+                "⬇️ Dubbed Audio",
+                data=audio_path.read_bytes(),
+                file_name=audio_path.name,
+                mime="audio/wav",
+            )
+    with col3:
+        if generate_tts and srt_path and srt_path.exists():
+            st.download_button(
+                "⬇️ SRT Subtitles",
+                data=srt_path.read_bytes(),
+                file_name=srt_path.name,
+                mime="text/plain",
+            )
+
+    if summary_path and summary_path.exists():
+        st.subheader("📝 Summary")
+        summary_text = summary_path.read_text(encoding="utf-8")
+        st.text_area("Summary output", value=summary_text, height=180)
+        st.download_button(
+            "⬇️ Summary",
+            data=summary_path.read_bytes(),
+            file_name=summary_path.name,
+            mime="text/plain",
+        )
+
+    if generate_tts and audio_path and audio_path.exists():
+        st.subheader("🔊 Translated Audio")
+        st.audio(str(audio_path))
+
+    if final_video and final_video.exists():
+        st.subheader("🎬 Final Translated Video")
+        st.video(str(final_video))
+        st.download_button(
+            "⬇️ Final Video",
+            data=final_video.read_bytes(),
+            file_name=final_video.name,
+            mime="video/mp4",
+        )
+
+
 with st.sidebar:
     st.header("📋 Configuration")
-    
-    # Step 1: Upload Video
-    st.subheader("1️⃣ Upload Video File")
-    uploaded_file = st.file_uploader(
-        "Select a video file (MP4, MKV, MOV)",
-        type=["mp4", "mkv", "mov"],
-        help="Maximum file size: 500MB"
-    )
-    
-    if uploaded_file:
-        st.success(f"✅ File selected: {uploaded_file.name}")
-        
-        # Save uploaded file
-        video_input_path = INPUTS_DIR / uploaded_file.name
-        with open(video_input_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-    else:
-        video_input_path = None
-        st.info("No file selected yet")
-    
-    st.divider()
-    
-    # Step 2: Language Selection
-    st.subheader("2️⃣ Language Selection")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        src_lang = st.selectbox(
-            "Source Language",
-            ["English", "Hindi", "Marathi"],
-            index=0,
-            help="Language of the original video audio"
+
+    input_mode = st.radio("Input Type", ["Audio / Video", "Text"])
+
+    uploaded_path = None
+    uploaded_file_name = None
+    text_input = ""
+
+    if input_mode == "Audio / Video":
+        uploaded_file = st.file_uploader(
+            "Upload audio or video",
+            type=MEDIA_EXTENSIONS,
+            help=(
+                "Video: MP4, MOV, AVI, WMV, MKV, FLV, WebM | "
+                "Audio: MP3, WAV, AAC, M4A, FLAC, WMA, OGG"
+            ),
         )
-    
-    with col2:
-        tgt_lang = st.selectbox(
-            "Target Language",
-            ["Marathi", "Hindi", "English"],
-            index=0,
-            help="Language for dubbing output"
-        )
-    
-    if src_lang == tgt_lang:
-        st.warning("⚠️ Source and target languages must be different!")
-        can_process = False
+        if uploaded_file:
+            uploaded_file_name = uploaded_file.name
+            uploaded_path = INPUTS_DIR / uploaded_file.name
+            uploaded_path.write_bytes(uploaded_file.getbuffer())
+            st.success(f"✅ {uploaded_file.name}")
     else:
-        can_process = True
-    
+        text_input = st.text_area(
+            "Text to translate",
+            height=180,
+            placeholder="Enter English, Hindi or Marathi text...",
+        )
+
     st.divider()
-    
-    # Step 3: Process Button
-    st.subheader("3️⃣ Start Pipeline")
-    generate_summary = st.checkbox(
-        "📝 Generate summary from all dubbed text",
-        value=True,
-        help="Create a dynamic number of summary points from the complete translated video text."
+    source_name = st.selectbox("Source Language", list(LANG_MAP.keys()), index=0)
+    target_name = st.selectbox("Target Language", list(LANG_MAP.keys()), index=1)
+    source_lang = LANG_MAP[source_name]
+    target_lang = LANG_MAP[target_name]
+
+    if source_lang == target_lang:
+        st.warning("Source and target languages must be different.")
+
+    generate_tts = st.checkbox("Generate translated voice", value=True)
+    generate_summary_option = st.checkbox("Generate summary", value=True)
+    burn_subtitles = st.checkbox("Burn subtitles into video", value=False)
+
+    valid_input = bool(uploaded_path) if input_mode == "Audio / Video" else bool(text_input.strip())
+    can_start = valid_input and source_lang != target_lang
+
+    start = st.button(
+        "🚀 Start Translation",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_start,
     )
-    if st.button("🚀 Start Translation & Dubbing", type="primary", disabled=not (video_input_path and can_process), use_container_width=True):
-        st.session_state.start_processing = True
-        st.session_state.generate_summary = generate_summary
 
-# ─────────────────────────────────────────────────────────
-# Main Content Area: Processing & Results
-# ─────────────────────────────────────────────────────────
-if not video_input_path:
-    st.info("👈 Please upload a video file using the sidebar to begin")
-    st.stop()
+if not can_start and not start:
+    st.info("Choose different source/target languages and provide an input to begin.")
 
-if LANG_MAP[src_lang] == LANG_MAP[tgt_lang]:
-    st.error("❌ Source and target languages must be different!")
-    st.stop()
+if start:
+    progress = st.progress(0)
+    status = st.empty()
+    log_area = st.empty()
+    all_logs = []
 
-# Initialize session state
-if "start_processing" not in st.session_state:
-    st.session_state.start_processing = False
-if "generate_summary" not in st.session_state:
-    st.session_state.generate_summary = True
-
-if st.session_state.start_processing:
-    src_code = LANG_MAP[src_lang]
-    tgt_code = LANG_MAP[tgt_lang]
-    
-    st.divider()
-    
-    # Create progress bar
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # Create logs storage
-    logs_dict = {
-        "stage1": "",
-        "stage2": "",
-        "stage3": "",
-        "stage4": "",
-        "errors": ""
-    }
-    
-    stages = [
-        ("🎙️ Speech Recognition (ASR)", 0.25, "stage1"),
-        ("🌐 Machine Translation", 0.50, "stage2"),
-        ("🎤 Text-to-Speech Synthesis", 0.75, "stage3"),
-        ("🎬 Video Muxing", 1.0, "stage4")
-    ]
-    
     try:
-        # ────────────────────────────────────────────
-        # STAGE 1: Speech Recognition (ASR)
-        # ────────────────────────────────────────────
-        status_text.info(f"⏳ {stages[0][0]}... Please wait")
-        progress_bar.progress(0.05)
-        
-        result = subprocess.run(
-        ["python3", str(BASE_DIR / "test_whisper_asr.py"), str(video_input_path), "--lang", src_code],
-        capture_output=True,
-        text=True,
-        cwd=str(BASE_DIR)
+        # ------------------------------------------------------------------
+        # Build exact cache key BEFORE any expensive model work.
+        # ------------------------------------------------------------------
+        if input_mode == "Audio / Video":
+            assert uploaded_path is not None
+            status.info("🔎 Checking cache...")
+            input_hash = compute_file_hash(str(uploaded_path))
+            input_type = "media"
+            extension = uploaded_path.suffix.lower().lstrip(".")
+        else:
+            input_hash = compute_text_hash(text_input)
+            input_type = "text"
+            extension = ""
+
+        cache_key = build_ui_cache_key(
+            input_hash=input_hash,
+            input_type=input_type,
+            source_language=source_lang,
+            target_language=target_lang,
+            generate_tts=generate_tts,
+            generate_summary=generate_summary_option,
+            burn_subtitles=burn_subtitles,
+            pipeline_version=PIPELINE_VERSION,
         )
-        
-        logs_dict["stage1"] = result.stdout
-        
-        if result.returncode != 0:
-            logs_dict["errors"] += f"\n❌ Stage 1 Error:\n{result.stderr}\n"
-            status_text.error(f"❌ {stages[0][0]} failed!")
-            st.error("Please try again or check the input video file.")
+
+        require_video = (
+            input_mode == "Audio / Video"
+            and extension in VIDEO_EXTENSIONS
+            and generate_tts
+        )
+
+        cached = get_ui_cached_result(cache_key)
+        if cached and cache_entry_is_usable(
+            cached,
+            require_tts=generate_tts,
+            require_summary=generate_summary_option,
+            require_video=require_video,
+        ):
+            progress.progress(100)
+            status.success("🎯 Cached result found")
+            render_results(
+                translated_json=db_path_to_path(cached["translated_json_path"]),
+                target_lang=target_lang,
+                generate_tts=generate_tts,
+                audio_path=db_path_to_path(cached.get("audio_path")),
+                srt_path=db_path_to_path(cached.get("srt_path")),
+                summary_path=db_path_to_path(cached.get("summary_path")),
+                final_video=db_path_to_path(cached.get("video_path")),
+                cache_hit=True,
+            )
             st.stop()
-        
-        progress_bar.progress(stages[0][1])
-        status_text.success(f"✅ {stages[0][0]} completed!")
-        
-        # ────────────────────────────────────────────
-        # STAGE 2: Translation
-        # ────────────────────────────────────────────
-        status_text.info(f"⏳ {stages[1][0]}... Please wait")
-        progress_bar.progress(0.30)
-        
-        result = subprocess.run(
-        ["python3", str(BASE_DIR / "run_step1_translation.py"), 
-        str(OUTPUTS_DIR / "step1_whisper_output.json"), tgt_code, src_code],
-        capture_output=True,
-        text=True,
-        cwd=str(BASE_DIR)
+        elif cached:
+            # Row exists but one or more cached artifact files were removed.
+            delete_ui_cached_result(cache_key)
+
+        # ------------------------------------------------------------------
+        # CACHE MISS: run the real pipeline.
+        # ------------------------------------------------------------------
+        st.info("🆕 Cache miss — running the offline pipeline.")
+
+        # Stage 1: ASR or text preparation
+        if input_mode == "Audio / Video":
+            status.info("🎙️ Stage 1/4: Speech recognition")
+            progress.progress(5)
+            all_logs.append(
+                stream_command(
+                    [
+                        PYTHON_BIN,
+                        str(BASE_DIR / "run_step1_asr.py"),
+                        str(uploaded_path),
+                        "--lang",
+                        source_lang,
+                        "--beam_size",
+                        "5",
+                        "--threads",
+                        "8",
+                    ],
+                    "ASR",
+                    log_area,
+                )
+            )
+        else:
+            status.info("📝 Stage 1/4: Preparing text input")
+            save_text_as_segments(text_input)
+            log_area.code("Text input prepared. Whisper skipped.", language="text")
+
+        progress.progress(25)
+
+        # Stage 2: Translation - ALL SIX COMBINATIONS
+        status.info(f"🌐 Stage 2/4: {source_name} → {target_name}")
+        translated_json = OUTPUTS_DIR / "step2_offline_translated.json"
+        all_logs.append(
+            stream_command(
+                [
+                    PYTHON_BIN,
+                    str(BASE_DIR / "run_step1_translation.py"),
+                    str(OUTPUTS_DIR / "step1_whisper_output.json"),
+                    target_lang,
+                    source_lang,
+                ],
+                "Translation",
+                log_area,
+            )
         )
-        
-        logs_dict["stage2"] = result.stdout
-        
-        if result.returncode != 0:
-            logs_dict["errors"] += f"\n❌ Stage 2 Error:\n{result.stderr}\n"
-            status_text.error(f"❌ {stages[1][0]} failed!")
-            st.error("Translation process encountered an error.")
-            st.stop()
-        
-        progress_bar.progress(stages[1][1])
-        status_text.success(f"✅ {stages[1][0]} completed!")
-        
-        # ────────────────────────────────────────────
-        # STAGE 3: Text-to-Speech
-        # ────────────────────────────────────────────
-        status_text.info(f"⏳ {stages[2][0]}... Please wait")
-        progress_bar.progress(0.55)
-        
-        # Use the Sherpa-ONNX path for all languages, including Marathi.
-        # The legacy Marathi script requires an external `piper` executable.
-        tts_script = "run_step2_tts_srt.py"
-        
-        result = subprocess.run(
-            ["python3", str(BASE_DIR / tts_script),
-             str(OUTPUTS_DIR / "step2_offline_translated.json"), tgt_code],
-            capture_output=True,
-            text=True,
-            cwd=str(BASE_DIR)
-        )
-        
-        logs_dict["stage3"] = result.stdout
-        
-        if result.returncode != 0:
-            logs_dict["errors"] += f"\n❌ Stage 3 Error:\n{result.stderr}\n"
-            status_text.error(f"❌ {stages[2][0]} failed!")
-            st.error("Audio synthesis encountered an error.")
-            if result.stdout:
-                st.code(result.stdout, language="text")
-            if result.stderr:
-                st.code(result.stderr, language="text")
-            st.stop()
-        
-        progress_bar.progress(stages[2][1])
-        status_text.success(f"✅ {stages[2][0]} completed!")
-        
-        # ────────────────────────────────────────────
-        # STAGE 4: Video Muxing
-        # ────────────────────────────────────────────
-        status_text.info(f"⏳ {stages[3][0]}... Please wait")
-        progress_bar.progress(0.85)
-        
-        result = subprocess.run(
-            ["python3", str(BASE_DIR / "test_video_muxing.py"),
-             str(video_input_path), tgt_code],
-            capture_output=True,
-            text=True,
-            cwd=str(BASE_DIR)
-        )
-        
-        logs_dict["stage4"] = result.stdout
-        
-        if result.returncode != 0:
-            logs_dict["errors"] += f"\n❌ Stage 4 Error:\n{result.stderr}\n"
-            status_text.error(f"❌ {stages[3][0]} failed!")
-            st.error("Video muxing encountered an error. Check if FFmpeg is installed correctly.")
-            st.stop()
-        
-        # Resolve the exact output file created by Stage 4.
-        # test_video_muxing.py prints the final saved path, so use that path
-        # instead of assuming a fixed filename.
-        final_video_path = None
+        progress.progress(50)
 
-        stage4_output = (result.stdout or "") + "\n" + (result.stderr or "")
+        # Stage 3: TTS + SRT
+        srt_path = OUTPUTS_DIR / f"video_subtitles_{target_lang}.srt"
+        audio_path = OUTPUTS_DIR / f"video_dubbed_{target_lang}.wav"
 
-        saved_match = re.search(
-            r"Final video saved as\\s*[:=]?\\s*(.+?\\.mp4)\\s*$",
-            stage4_output,
-            re.IGNORECASE | re.MULTILINE
-        )
+        if generate_tts:
+            status.info(f"🎤 Stage 3/4: {target_name} speech synthesis")
+            all_logs.append(
+                stream_command(
+                    [
+                        PYTHON_BIN,
+                        str(BASE_DIR / "run_step2_tts_srt.py"),
+                        str(translated_json),
+                        target_lang,
+                    ],
+                    "TTS/SRT",
+                    log_area,
+                )
+            )
+        else:
+            status.info("📄 Stage 3/4: Voice generation skipped")
 
-        if saved_match:
-            saved_path = Path(saved_match.group(1).strip().strip('"').strip("'"))
+        progress.progress(75)
 
-            if not saved_path.is_absolute():
-                saved_path = (BASE_DIR / saved_path).resolve()
-            else:
-                saved_path = saved_path.resolve()
-
-            if saved_path.exists():
-                final_video_path = saved_path
-
-        # Current naming-convention fallback.
-        if final_video_path is None:
-            candidate = OUTPUTS_DIR / f"final_translated_video_{tgt_code}.mp4"
+        # Stage 4: video muxing / summary
+        final_video = None
+        if require_video:
+            status.info("🎬 Stage 4/4: Video muxing")
+            mux_cmd = [
+                PYTHON_BIN,
+                str(BASE_DIR / "test_video_muxing.py"),
+                str(uploaded_path),
+                target_lang,
+            ]
+            if burn_subtitles:
+                mux_cmd.append("--burn-subs")
+            all_logs.append(stream_command(mux_cmd, "Video muxing", log_area))
+            candidate = OUTPUTS_DIR / f"final_translated_video_{target_lang}.mp4"
             if candidate.exists():
-                final_video_path = candidate.resolve()
-
-        # Future-proof fallback: find the newest MP4 recursively.
-        if final_video_path is None:
-            video_files = list(OUTPUTS_DIR.rglob("*.mp4"))
-            if video_files:
-                final_video_path = max(
-                    video_files,
-                    key=lambda p: p.stat().st_mtime
-                ).resolve()
-
-        if final_video_path is None:
-            logs_dict["errors"] += (
-                "\n❌ Stage 4 completed, but Streamlit could not locate the generated MP4.\n"
-                f"Expected output directory: {OUTPUTS_DIR}\n"
-                f"Stage 4 output:\n{stage4_output}\n"
-            )
-            status_text.error("❌ Video was generated, but the output file could not be located.")
-            st.error("⚠️ Final video not found. Please check the output path below.")
-            st.code(
-                f"Expected output directory:\n{OUTPUTS_DIR}\n\n"
-                f"Stage 4 output:\n{stage4_output}"
-            )
-            st.stop()
-
-        progress_bar.progress(stages[3][1])
-        status_text.success(f"✅ {stages[3][0]} completed!")
+                final_video = candidate
+        else:
+            status.info("✅ Stage 4/4: Finalizing outputs")
 
         summary_path = None
-        if st.session_state.generate_summary:
-            status_text.info("⏳ Generating summary from all dubbed text...")
-            translated_json = OUTPUTS_DIR / "step2_offline_translated.json"
-            summary_path = generate_video_summary(translated_json, tgt_code)
-            status_text.success("✅ Complete video summary created!")
-        
-        # ────────────────────────────────────────────
-        # SUCCESS: Display Results
-        # ────────────────────────────────────────────
-        progress_bar.progress(1.0)
-        status_text.empty()
-        
-        st.success("🎉 Pipeline Completed Successfully!")
-        
-        st.divider()
-        st.subheader("📺 Preview & Download")
-        
-        # Use the exact output path resolved after Stage 4.
-        if final_video_path and final_video_path.exists():
-            
-            # Display video preview
-            st.video(str(final_video_path))
-            
-            # Download button and folder button
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                with open(final_video_path, "rb") as f:
-                    st.download_button(
-                        label="⬇️ Download Dubbed Video",
-                        data=f,
-                        file_name=f"dubbed_{tgt_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4",
-                        mime="video/mp4",
-                        use_container_width=True
-                    )
-            
-            with col2:
-                if st.button("📁 Open Output Folder", use_container_width=True):
-                    if platform.system() == "Darwin":  # macOS
-                        subprocess.run(["open", str(OUTPUTS_DIR)])
-                    elif platform.system() == "Windows":
-                        subprocess.run(["explorer", str(OUTPUTS_DIR)])
-                    else:  # Linux
-                        subprocess.run(["xdg-open", str(OUTPUTS_DIR)])
-                    st.info(f"📂 Opened output folder")
-            
-            with col3:
-                if st.button("🔄 Process Another Video", use_container_width=True):
-                    st.session_state.start_processing = False
-                    st.rerun()
-            
-            st.divider()
+        if generate_summary_option:
+            summary_path = generate_summary(translated_json, target_lang)
 
-            if summary_path and summary_path.exists():
-                st.subheader("📝 Final Dubbed Video Summary")
-                summary_text = summary_path.read_text(encoding="utf-8")
-                st.code(summary_text, language="text")
-                with open(summary_path, "rb") as f:
-                    st.download_button(
-                        label="⬇️ Download Summary",
-                        data=f,
-                        file_name=f"final_summary_{tgt_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        mime="text/plain",
-                        use_container_width=True,
-                    )
+        progress.progress(90)
 
-            st.divider()
-            
-            # Show output files summary
-            st.subheader("📂 Generated Files")
-            output_files = {
-                "🎬 Dubbed Video": final_video_path,
-                "📝 Transcript": OUTPUTS_DIR / "step1_whisper_output.json",
-                "🌐 Translation": OUTPUTS_DIR / "step2_offline_translated.json",
-                "📄 Subtitles": OUTPUTS_DIR / f"video_subtitles_{tgt_code}.srt",
-                "📝 Video Summary": summary_path
-            }
-            
-            file_count = 0
-            for name, path in output_files.items():
-                if path is not None and path.exists():
-                    file_count += 1
-            
-            st.success(f"✅ {file_count} files generated in `storage_vault/outputs/`")
-            
-            # Show logs in expandable section
-            st.divider()
-            with st.expander("📋 View Processing Logs", expanded=False):
-                if logs_dict["errors"]:
-                    st.warning("⚠️ Errors Encountered:")
-                    st.code(logs_dict["errors"], language="text")
-                
-                st.subheader("Stage 1: Speech Recognition")
-                if logs_dict["stage1"]:
-                    st.code(logs_dict["stage1"], language="text")
-                else:
-                    st.info("No logs available")
-                
-                st.subheader("Stage 2: Translation")
-                if logs_dict["stage2"]:
-                    st.code(logs_dict["stage2"], language="text")
-                else:
-                    st.info("No logs available")
-                
-                st.subheader("Stage 3: Text-to-Speech")
-                if logs_dict["stage3"]:
-                    st.code(logs_dict["stage3"], language="text")
-                else:
-                    st.info("No logs available")
-                
-                st.subheader("Stage 4: Video Muxing")
-                if logs_dict["stage4"]:
-                    st.code(logs_dict["stage4"], language="text")
-                else:
-                    st.info("No logs available")
-        else:
-            st.error("⚠️ Final video not found. Please check the output folder.")
+        # ------------------------------------------------------------------
+        # Save immutable copies of the artifacts into this cache entry.
+        # Fixed pipeline output names can be overwritten by the next job,
+        # so cached results MUST use their own directory.
+        # ------------------------------------------------------------------
+        cache_entry_dir = CACHE_DIR / cache_key
+        cache_entry_dir.mkdir(parents=True, exist_ok=True)
+
+        cached_transcript = copy_if_exists(
+            OUTPUTS_DIR / "step1_whisper_output.json",
+            cache_entry_dir / "transcript.json",
+        )
+        cached_translation = copy_if_exists(
+            translated_json,
+            cache_entry_dir / "translation.json",
+        )
+        if cached_translation is None:
+            raise RuntimeError("Translated JSON was not produced, so the result cannot be cached.")
+
+        cached_audio = copy_if_exists(
+            audio_path if generate_tts else None,
+            cache_entry_dir / "translated_audio.wav",
+        )
+        cached_srt = copy_if_exists(
+            srt_path if generate_tts else None,
+            cache_entry_dir / "subtitles.srt",
+        )
+        cached_summary = copy_if_exists(
+            summary_path,
+            cache_entry_dir / "summary.txt",
+        )
+        cached_video = copy_if_exists(
+            final_video,
+            cache_entry_dir / "final_video.mp4",
+        )
+
+        save_ui_cached_result(
+            cache_key=cache_key,
+            input_hash=input_hash,
+            input_type=input_type,
+            file_name=uploaded_file_name,
+            source_language=source_lang,
+            target_language=target_lang,
+            generate_tts=generate_tts,
+            generate_summary=generate_summary_option,
+            burn_subtitles=burn_subtitles,
+            pipeline_version=PIPELINE_VERSION,
+            transcript_json_path=cache_path_to_db(cached_transcript),
+            translated_json_path=cache_path_to_db(cached_translation),
+            audio_path=cache_path_to_db(cached_audio),
+            srt_path=cache_path_to_db(cached_srt),
+            summary_path=cache_path_to_db(cached_summary),
+            video_path=cache_path_to_db(cached_video),
+            metadata={
+                "source_name": source_name,
+                "target_name": target_name,
+            },
+        )
+
+        progress.progress(100)
+        status.success("✅ Processing completed and cached")
+
+        render_results(
+            translated_json=cached_translation,
+            target_lang=target_lang,
+            generate_tts=generate_tts,
+            audio_path=cached_audio,
+            srt_path=cached_srt,
+            summary_path=cached_summary,
+            final_video=cached_video,
+            cache_hit=False,
+        )
+
+        with st.expander("📜 Final processing log", expanded=False):
             st.code(
-                f"Expected output directory:\n{OUTPUTS_DIR}\n\n"
-                f"Resolved final video path:\n{final_video_path}"
+                "\n\n".join(all_logs) if all_logs else "No subprocess log was produced.",
+                language="text",
             )
-    
-    except Exception as e:
-        progress_bar.progress(0)
-        status_text.error(f"❌ Error: {str(e)}")
-        st.stop()
+
+    except Exception as exc:
+        progress.progress(0)
+        status.error("❌ Processing failed")
+        st.exception(exc)
