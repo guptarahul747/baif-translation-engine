@@ -36,13 +36,58 @@ st.set_page_config(
 st.title("🎙️ BAIF Offline Video Translation & Dubbing Engine")
 st.caption("Complete 4-Stage Pipeline: ASR → Translation → TTS → Video Muxing")
 
-def generate_video_summary(translated_json_path: Path, target_lang: str, max_sentences: int = 999) -> Path:
-    """Create the full translated narration for the final dubbed video."""
+def summarize_transcript(texts: list[str]) -> str:
+    """Create a dynamic number of concise bullets from the complete narration."""
+    full_text = " ".join(texts)
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?।॥])\s+", full_text)
+        if sentence.strip()
+    ]
+    unique_sentences = []
+    seen_sentences = set()
+    for sentence in sentences:
+        normalized = re.sub(r"\s+", " ", sentence).casefold()
+        if normalized not in seen_sentences:
+            seen_sentences.add(normalized)
+            unique_sentences.append(sentence)
+    sentences = unique_sentences
+
+    if len(sentences) <= 3:
+        selected_sentences = sentences
+    else:
+        # Larger transcripts receive more points, without a fixed maximum.
+        summary_count = max(3, round(len(sentences) * 0.4))
+        words = re.findall(r"[\w\u0900-\u097F]+", full_text.lower(), flags=re.UNICODE)
+        frequencies = {}
+        for word in words:
+            if len(word) > 2:
+                frequencies[word] = frequencies.get(word, 0) + 1
+
+        scored_sentences = []
+        for index, sentence in enumerate(sentences):
+            sentence_words = re.findall(r"[\w\u0900-\u097F]+", sentence.lower(), flags=re.UNICODE)
+            score = sum(frequencies.get(word, 0) for word in sentence_words)
+            scored_sentences.append((score / max(len(sentence_words), 1), index, sentence))
+
+        selected_sentences = [
+            sentence
+            for _, _, sentence in sorted(
+                sorted(scored_sentences, reverse=True)[:summary_count],
+                key=lambda item: item[1]
+            )
+        ]
+
+    return "\n".join(f"- {sentence}" for sentence in selected_sentences)
+
+
+def generate_video_summary(translated_json_path: Path, target_lang: str) -> Path:
+    """Create bullet-point summary from all translated dubbed-video text."""
     summary_path = translated_json_path.with_name(f"final_video_summary_{target_lang}.txt")
 
     if not translated_json_path.exists():
         summary_text = (
-            f"Final dubbed video transcript ({target_lang.upper()}):\n\n"
+            f"Final dubbed video bullet-point summary ({target_lang.upper()}):\n\n"
             f"No translated segments were found for this video."
         )
         summary_path.write_text(summary_text, encoding="utf-8")
@@ -53,7 +98,7 @@ def generate_video_summary(translated_json_path: Path, target_lang: str, max_sen
             segments = json.load(f)
     except Exception:
         summary_text = (
-            f"Final dubbed video transcript ({target_lang.upper()}):\n\n"
+            f"Final dubbed video bullet-point summary ({target_lang.upper()}):\n\n"
             f"No translated segments were found for this video."
         )
         summary_path.write_text(summary_text, encoding="utf-8")
@@ -69,14 +114,13 @@ def generate_video_summary(translated_json_path: Path, target_lang: str, max_sen
 
     if not texts:
         summary_text = (
-            f"Final dubbed video transcript ({target_lang.upper()}):\n\n"
+            f"Final dubbed video bullet-point summary ({target_lang.upper()}):\n\n"
             f"No translated segments were found for this video."
         )
     else:
-        selected = texts[:max_sentences]
         summary_text = (
-            f"Final dubbed video transcript ({target_lang.upper()}):\n\n"
-            + "\n".join(f"{idx + 1}. {line}" for idx, line in enumerate(selected))
+            f"Final dubbed video bullet-point summary ({target_lang.upper()}):\n\n"
+            + summarize_transcript(texts)
         )
 
     summary_path.write_text(summary_text, encoding="utf-8")
@@ -140,9 +184,9 @@ with st.sidebar:
     # Step 3: Process Button
     st.subheader("3️⃣ Start Pipeline")
     generate_summary = st.checkbox(
-        "📝 Generate summary for final dubbed video",
+        "📝 Generate summary from all dubbed text",
         value=True,
-        help="Create a short summary after the dubbed video is produced."
+        help="Create a dynamic number of summary points from the complete translated video text."
     )
     if st.button("🚀 Start Translation & Dubbing", type="primary", disabled=not (video_input_path and can_process), use_container_width=True):
         st.session_state.start_processing = True
@@ -247,11 +291,9 @@ if st.session_state.start_processing:
         status_text.info(f"⏳ {stages[2][0]}... Please wait")
         progress_bar.progress(0.55)
         
-        # Select correct TTS script based on target language
-        if tgt_code == "mr":
-            tts_script = "run_step2_tts_srt_mr.py"
-        else:
-            tts_script = "run_step2_tts_srt.py"
+        # Use the Sherpa-ONNX path for all languages, including Marathi.
+        # The legacy Marathi script requires an external `piper` executable.
+        tts_script = "run_step2_tts_srt.py"
         
         result = subprocess.run(
             ["python3", str(BASE_DIR / tts_script),
@@ -267,6 +309,10 @@ if st.session_state.start_processing:
             logs_dict["errors"] += f"\n❌ Stage 3 Error:\n{result.stderr}\n"
             status_text.error(f"❌ {stages[2][0]} failed!")
             st.error("Audio synthesis encountered an error.")
+            if result.stdout:
+                st.code(result.stdout, language="text")
+            if result.stderr:
+                st.code(result.stderr, language="text")
             st.stop()
         
         progress_bar.progress(stages[2][1])
@@ -352,10 +398,10 @@ if st.session_state.start_processing:
 
         summary_path = None
         if st.session_state.generate_summary:
-            status_text.info("⏳ Generating final dubbed video summary...")
+            status_text.info("⏳ Generating summary from all dubbed text...")
             translated_json = OUTPUTS_DIR / "step2_offline_translated.json"
             summary_path = generate_video_summary(translated_json, tgt_code)
-            status_text.success("✅ Final summary created!")
+            status_text.success("✅ Complete video summary created!")
         
         # ────────────────────────────────────────────
         # SUCCESS: Display Results
@@ -426,7 +472,7 @@ if st.session_state.start_processing:
                 "📝 Transcript": OUTPUTS_DIR / "step1_whisper_output.json",
                 "🌐 Translation": OUTPUTS_DIR / "step2_offline_translated.json",
                 "📄 Subtitles": OUTPUTS_DIR / f"video_subtitles_{tgt_code}.srt",
-                "📝 Summary": summary_path
+                "📝 Video Summary": summary_path
             }
             
             file_count = 0
