@@ -17,11 +17,11 @@ from fastapi.responses import FileResponse
 try:
     from app.modules.database import init_db, compute_file_hash, get_cached_job, save_job
     from app.modules.ingestion import extract_and_normalize_audio
-    from app.modules.inference import TranslationPipeline
+    from app.modules.inference import PipelineInferenceEngine
 except ModuleNotFoundError:
     from modules.database import init_db, compute_file_hash, get_cached_job, save_job
     from modules.ingestion import extract_and_normalize_audio
-    from modules.inference import TranslationPipeline
+    from modules.inference import PipelineInferenceEngine
 
 app = FastAPI(
     title="BAIF Offline Translation API",
@@ -33,7 +33,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 INPUTS_DIR = BASE_DIR / "storage_vault" / "inputs"
 OUTPUTS_DIR = BASE_DIR / "storage_vault" / "outputs"
 
-pipeline: TranslationPipeline = None
+pipeline: PipelineInferenceEngine = None
 job_status_tracker: Dict[str, Dict[str, Any]] = {}
 
 
@@ -44,7 +44,7 @@ def startup_event():
     INPUTS_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     print("🚀 Initializing Translation Pipeline in background...", flush=True)
-    pipeline = TranslationPipeline()
+    pipeline = PipelineInferenceEngine()
 
 
 def run_translation_job(job_id: str, raw_file_path: str, file_hash: str, file_name: str, target_lang: str):
