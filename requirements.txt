@@ -2,10 +2,11 @@
 # Tested target: Python 3.12 x64 / arm64
 
 streamlit==1.32.0
-faster-whisper==1.0.1
+faster-whisper==1.1.1
 ctranslate2==4.1.0
 sentencepiece==0.2.0
 sherpa-onnx==1.13.4
 soundfile==0.12.1
 srt==3.5.3
 numpy==1.26.4
+setuptools<70

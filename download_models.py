@@ -51,16 +51,22 @@ def clean_symlinks(directory: Path):
 def flatten_ct2_directory(target_dir: Path):
     """Ensures model.bin and configs live in the target root, not nested subfolders."""
     if not (target_dir / "model.bin").exists():
-        for sub_bin in target_dir.rglob("model.bin"):
+        for sub_bin in list(target_dir.rglob("model.bin")):
             src_folder = sub_bin.parent
-            for item in src_folder.iterdir():
+            for item in list(src_folder.iterdir()):
                 dest = target_dir / item.name
-                if not dest.exists():
-                    shutil.move(str(item), str(dest))
-            # remove leftover empty nested folder
-            for nested in target_dir.iterdir():
-                if nested.is_dir() and nested.name != target_dir.name:
-                    shutil.rmtree(str(nested), ignore_errors=True)
+                if dest.resolve() == item.resolve():
+                    continue
+                if dest.exists():
+                    if dest.is_dir():
+                        shutil.rmtree(dest)
+                    else:
+                        dest.unlink()
+                shutil.move(str(item), str(dest))
+            for nested in list(target_dir.iterdir()):
+                if nested.is_dir() and nested.name not in ("vocab",):
+                    if "1b-ct2" in nested.name or nested.name == ".cache":
+                        shutil.rmtree(str(nested), ignore_errors=True)
             break
 
 def download_universal_espeak(target_dir: Path):

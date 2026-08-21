@@ -1,322 +1,198 @@
-# BAIF Offline Translation Engine — Windows Fresh Installation
+# BAIF Offline Translation Engine — Windows Installation & Operation Guide
 
-This is the recommended guide for the **final BAIF Windows machine**.
-
-It installs the stable last-known-good pipeline and downloads the exact verified model vault while internet is temporarily available. After verification, the application runs offline.
-
-## Final runtime capabilities
-
-- Fully offline after first-time setup
-- English, Hindi and Marathi
-- All 6 translation directions
-- Hindi ↔ Marathi through the proven English pivot
-- Offline Whisper ASR
-- Offline IndicTrans2 CTranslate2 translation
-- Offline English/Hindi/Marathi TTS
-- Text/audio/video UI
-- subtitles, dubbed output and optional summary
-- persistent completed-result cache
+This guide provides both a **One-Click Automated Solution** and a **Step-by-Step Manual Process** for setting up and running the BAIF offline translation pipeline on Windows x64.
 
 ---
 
-## 0. Values needed before setup
+## 🌟 Quick Start (One-Click Scripts)
 
-Have these ready:
+For the easiest setup experience, use the provided Windows batch scripts (or PowerShell scripts).
 
-```text
-REPO_URL=<your Git repository URL>
-BRANCH=<your deployment branch>
-MODEL_REPO_ID=<private Hugging Face model repo prepared with MODEL_DISTRIBUTION_GUIDE.md>
-```
-
-The Windows PC needs internet only for initial software/package/model installation.
-
----
-
-## 1. Install system prerequisites
-
-Install BAIF-approved x64 versions of:
-
-1. **Git for Windows**
-2. **Python 3.12 x64**
-3. **FFmpeg x64**
-4. **Microsoft Visual C++ 2015–2022 Redistributable x64**
-
-During Python installation, enable the option to add Python to PATH if your BAIF policy allows it.
-
-For FFmpeg, add its `bin` directory to Windows PATH, for example:
-
-```text
-C:\ffmpeg\bin
-```
-
-Open a **new PowerShell** window after installation and verify:
-
+### 1. Setup (One-Click)
+Double-click `setup_windows.bat` or run in PowerShell:
 ```powershell
-git --version
+.\setup_windows.ps1
+```
+**What this script does automatically:**
+- Detects Python 3.12 x64 on your system.
+- Detects FFmpeg / FFprobe and automatically adds `C:\ffmpeg\bin` (or standard paths) to your Windows PATH.
+- Creates the local virtual environment (`.venv`).
+- Installs and upgrades all runtime and setup dependencies (`pip`, `wheel`, `packaging`, `streamlit`, `faster-whisper`, `ctranslate2`, `sherpa-onnx`, `soundfile`, `srt`, `sentencepiece`, `numpy`, `setuptools`).
+- Downloads and provisions all required models into `local_model_vault/`.
+- Runs complete pre-flight and model inference verification.
+
+*Optional parameters for private repository downloads:*
+```powershell
+.\setup_windows.ps1 -ModelRepoId "your-org/baif-production-model-vault" -HfToken "hf_your_token"
+```
+
+### 2. Validation (One-Click)
+Double-click `validate_windows.bat` or run in PowerShell:
+```powershell
+.\validate_windows.ps1
+```
+**What this script does:**
+- Validates Python 3.12, FFmpeg, and FFprobe availability.
+- Validates all package imports and dependency health.
+- Validates all local model files in `local_model_vault/`.
+- Runs end-to-end inference verification for:
+  - **Whisper ASR Engine**
+  - **6/6 Bidirectional NMT Translation Combinations** (EN↔HI, EN↔MR, HI↔MR)
+  - **3/3 TTS Voice Engines** (English, Hindi, Marathi)
+- If any check fails, it highlights the exact manual remedy needed.
+
+### 3. Run the Application (One-Click)
+Double-click `run_windows.bat` or run in PowerShell:
+```powershell
+.\run_windows.bat
+```
+- Automatically configures environment variables (`PYTHONUTF8=1`, `PATH`).
+- Starts the Streamlit application.
+- Opens your default web browser to: **http://localhost:8501**
+
+---
+
+## 📖 Step-by-Step Manual Installation Process
+
+If you prefer to perform each step manually or need custom deployment control, follow the instructions below.
+
+### Step 1: Install System Prerequisites
+Install the following 64-bit software on Windows:
+1. **Git for Windows**: [https://git-scm.com/download/win](https://git-scm.com/download/win)
+2. **Python 3.12 x64**: [https://www.python.org/downloads/](https://www.python.org/downloads/) *(Enable "Add python.exe to PATH" during setup)*
+3. **FFmpeg x64**: [https://www.gyan.dev/ffmpeg/builds/](https://www.gyan.dev/ffmpeg/builds/) *(Extract to `C:\ffmpeg\bin` and add to PATH)*
+4. **Microsoft Visual C++ 2015–2022 Redistributable x64**: [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+
+Verify in PowerShell:
+```powershell
 py -3.12 --version
+git --version
 ffmpeg -version
 ffprobe -version
 ```
 
-Python should be `3.12.x`.
-
----
-
-## 2. Clone the repository
-
-Choose an approved local directory, for example:
-
+### Step 2: Clone the Repository & Checkout Branch
 ```powershell
-New-Item -ItemType Directory -Force C:\BAIF | Out-Null
-Set-Location C:\BAIF
-
-git clone <REPO_URL>
-Set-Location .\baif-translation-engine
-git checkout <BRANCH>
-```
-
-Verify:
-
-```powershell
+mkdir C:\BAIF
+cd C:\BAIF
+git clone <YOUR_REPOSITORY_URL>
+cd baif-translation-engine
+git checkout baif-swagatika
 git branch --show-current
 ```
 
----
-
-## 3. Create the virtual environment
-
+### Step 3: Create Python Virtual Environment
 ```powershell
 py -3.12 -m venv .venv
-```
-
-You do **not** have to activate the environment. Using its Python executable directly avoids PowerShell execution-policy issues.
-
-Verify:
-
-```powershell
 .\.venv\Scripts\python.exe --version
 ```
 
----
-
-## 4. Install Python dependencies
-
+### Step 4: Install Dependencies
 ```powershell
-.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.\.venv\Scripts\python.exe -m pip install --upgrade pip "setuptools<70" "wheel==0.43.0" "packaging<24,>=16.8"
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pip install -r requirements-setup.txt
 .\.venv\Scripts\python.exe -m pip check
 ```
+*Expected: `No broken requirements found.`*
 
-`requirements-setup.txt` is used only for the first-time model download utility.
-
----
-
-## 5. Download the exact production models
-
-The stable production vault should already have been published to a private Hugging Face model repository using `MODEL_DISTRIBUTION_GUIDE.md`.
-
-### Recommended — temporary token in the current PowerShell session
-
+### Step 5: Download & Provision Model Vault
+#### Option A: Direct Production Download (Recommended)
 ```powershell
-$env:BAIF_MODEL_REPO_ID = "<MODEL_REPO_ID>"
+$env:PYTHONUTF8 = "1"
+.\.venv\Scripts\python.exe download_models.py
+```
+
+#### Option B: From Private Hugging Face Repository
+```powershell
+$env:BAIF_MODEL_REPO_ID = "swagatika15/baif-production-model-vault"
 $env:HF_TOKEN = "hf_your_read_token"
-
 .\.venv\Scripts\python.exe download_production_models.py
+Remove-Item Env:HF_TOKEN -ErrorAction SilentlyContinue
 ```
 
-After successful download:
-
-```powershell
-Remove-Item Env:HF_TOKEN
-```
-
-You may also remove the repo ID environment variable after setup:
-
-```powershell
-Remove-Item Env:BAIF_MODEL_REPO_ID
-```
-
-The script creates:
-
+#### Verified Local Model Vault Structure:
 ```text
-C:\BAIF\baif-translation-engine\local_model_vault\
-├── whisper\
-├── indictrans2\
-│   ├── en-indic\
-│   └── indic-en\
-└── tts\
-    ├── english\
-    ├── hindi\
-    └── marathi\
+local_model_vault/
+├── whisper/
+│   ├── model.bin
+│   └── config.json
+├── indictrans2/
+│   ├── en-indic/
+│   │   ├── model.bin
+│   │   ├── config.json
+│   │   └── vocab/ (model.SRC, model.TGT)
+│   └── indic-en/
+│       ├── model.bin
+│       ├── config.json
+│       └── vocab/ (model.SRC, model.TGT)
+└── tts/
+    ├── english/ (en_US-lessac-medium.onnx, tokens.txt, espeak-ng-data)
+    ├── hindi/   (hi_IN-pratham-medium.onnx, tokens.txt, espeak-ng-data)
+    └── marathi/ (mr_IN-google-medium.onnx, tokens.txt, espeak-ng-data)
 ```
 
-The stable production build does **not** require the experimental Indic-Indic 320M model.
-
----
-
-## 6. Run the installation pre-flight
-
+### Step 6: Verify Installation & Models
 ```powershell
+$env:PYTHONUTF8 = "1"
 .\.venv\Scripts\python.exe verify_installation.py
-```
-
-Expected ending:
-
-```text
-✅ Pre-flight passed.
-Next: python verify_all_models.py
-```
-
----
-
-## 7. Run full model verification
-
-```powershell
 .\.venv\Scripts\python.exe verify_all_models.py
 ```
-
-Confirm:
-
+*Expected summary:*
 ```text
-Whisper ASR Engine       ✅
-6/6 NMT combinations     ✅
-3/3 TTS voice engines    ✅
+• Model Vault Files      : ✅ PASSED
+• Whisper ASR Engine     : ✅ PASSED
+• 6/6 NMT Combinations   : ✅ PASSED
+• 3/3 TTS Voice Engines  : ✅ PASSED
 ```
 
-If any required model fails, fix it before internet access is removed.
-
----
-
-## 8. Start the Streamlit application
-
+### Step 7: Launch Application
 ```powershell
+$env:PYTHONUTF8 = "1"
 .\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
 ```
-
-Open:
-
-```text
-http://localhost:8501
-```
-
-The stable UI runs the pipeline scripts directly. Do **not** start FastAPI/Uvicorn separately for this deployment.
+Open browser to `http://localhost:8501`.
 
 ---
 
-## 9. End-to-end setup test while internet is still available
+## 🔒 Offline Operation & Disconnecting Internet
 
-Test at minimum:
-
-1. English → Hindi
-2. English → Marathi
-3. Hindi → English
-4. Marathi → English
-5. Hindi → Marathi
-6. Marathi → Hindi
-7. one English TTS output
-8. one Hindi TTS output
-9. one Marathi TTS output
-10. a short video with dubbed/subtitle output
-11. run the exact same job twice and confirm the second run uses the cache
+1. After verification succeeds, remove any temporary tokens:
+   ```powershell
+   Remove-Item Env:HF_TOKEN -ErrorAction SilentlyContinue
+   Remove-Item Env:BAIF_MODEL_REPO_ID -ErrorAction SilentlyContinue
+   ```
+2. Disconnect the machine from the internet.
+3. Launch using `.\run_windows.bat`.
+4. Test with a new, uncached file. All translation, transcription, and TTS synthesis operations will execute completely locally and offline.
 
 ---
 
-## 10. Prove the final machine is offline-capable
+## 🛠️ Troubleshooting
 
-After all verification passes:
+### 1. `ffmpeg` or `ffprobe` is not recognized
+- Make sure FFmpeg is extracted (e.g. to `C:\ffmpeg\bin`).
+- Run `setup_windows.bat` or `validate_windows.bat` — it automatically detects `C:\ffmpeg\bin` and adds it to your user PATH.
+- Or manually add `C:\ffmpeg\bin` to Windows System/User Environment Variables.
 
-1. remove `HF_TOKEN`
-2. remove any saved Hugging Face credentials if you used interactive login
-3. disconnect network/internet
-4. restart Streamlit
-5. process a **new uncached** file
+### 2. Python 3.12 not recognized
+- Install Python 3.12 x64 from python.org.
+- Ensure `py -3.12 --version` or `python --version` returns `3.12.x`.
 
-```powershell
-.\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
-```
+### 3. Port 8501 already in use
+- Launch on a custom port:
+  ```powershell
+  .\.venv\Scripts\python.exe -m streamlit run app\web_ui.py --server.port 8502
+  ```
+  or with the run script:
+  ```powershell
+  .\run_windows.ps1 -Port 8502
+  ```
 
-The new translation must work with no network connection.
-
----
-
-## 11. Normal daily Windows startup
-
-```powershell
-Set-Location C:\BAIF\baif-translation-engine
-.\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
-```
-
-No internet, Hugging Face token or Python-environment activation is required for normal runtime.
-
----
-
-## Optional PowerShell activation
-
-If BAIF policy permits PowerShell scripts:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-If execution policy blocks it, do not change corporate policy just for this project; use `.\.venv\Scripts\python.exe` commands shown above.
-
----
-
-## Troubleshooting
-
-### `py -3.12` does not work
-
-Confirm Python 3.12 x64 is installed. On some managed machines use:
-
-```powershell
-python --version
-```
-
-If `python` is Python 3.12, create the environment with:
-
-```powershell
-python -m venv .venv
-```
-
-### `ffmpeg` is not recognized
-
-Confirm the FFmpeg `bin` folder is on PATH, close PowerShell and open a new window.
-
-```powershell
-where.exe ffmpeg
-where.exe ffprobe
-```
-
-### Import/DLL error when loading native packages
-
-Confirm the Microsoft Visual C++ 2015–2022 Redistributable **x64** is installed, then reopen PowerShell/restart Windows if required.
-
-### Private model repo returns 401/403
-
-Check:
-
-- token has read permission
-- token/account has access to the private model repository
-- `MODEL_REPO_ID` is correct
-
-### Re-download intentionally
-
-Only if the local vault is known to be incomplete/corrupt:
-
-```powershell
-.\.venv\Scripts\python.exe download_production_models.py --force
-```
-
-### Port 8501 already in use
-
-```powershell
-.\.venv\Scripts\python.exe -m streamlit run app\web_ui.py --server.port 8502
-```
-
----
-
-## 12. Third-party model licensing
-
-Before production handover, review `MODEL_LICENSE_NOTES.md`. Individual TTS voices can have terms that differ from the repository-level license.
+### 4. Character Encoding Warnings in PowerShell
+- Set UTF-8 encoding in your PowerShell session:
+  ```powershell
+  $env:PYTHONUTF8 = "1"
+  $env:PYTHONIOENCODING = "utf-8"
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  ```
