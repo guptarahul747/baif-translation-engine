@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Download the exact BAIF production model vault during first-time setup.
-
-The model package should be the private Hugging Face repository created by
-publish_production_model_vault.py. After download, runtime inference uses only
-local_model_vault and does not need internet or a Hugging Face token.
-"""
+"""Download the exact BAIF production model vault with persistent resume."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import shutil
+import sys
+import time
 from pathlib import Path
+
+# Enforce long timeouts before importing huggingface_hub
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "3600"
+os.environ["HF_HUB_ETAG_TIMEOUT"] = "3600"
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
 from huggingface_hub import snapshot_download
 
@@ -54,49 +56,50 @@ def validate(vault: Path) -> None:
         if not (vault / rel).is_dir():
             missing.append(rel + "/")
     if missing:
-        raise RuntimeError("Downloaded vault is incomplete:\n  - " + "\n  - ".join(missing))
+        raise RuntimeError("Downloaded vault is incomplete:\n - " + "\n - ".join(missing))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-id", default=os.environ.get("BAIF_MODEL_REPO_ID"))
     parser.add_argument("--dest", type=Path, default=DEFAULT_DEST)
-    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
     if not args.repo_id:
         raise SystemExit("Provide --repo-id YOUR_ORG/YOUR_PRIVATE_MODEL_REPO or set BAIF_MODEL_REPO_ID.")
 
     dest = args.dest.resolve()
-    tmp = dest.parent / (dest.name + ".download_tmp")
-
-    if dest.exists():
-        if not args.force:
-            raise SystemExit(f"Destination already exists: {dest}\nUse --force only if you intentionally want to replace it.")
-        shutil.rmtree(dest)
-    if tmp.exists():
-        shutil.rmtree(tmp)
-
     token = os.environ.get("HF_TOKEN") or None
 
-    print(f"Downloading production model vault from private repo: {args.repo_id}")
-    print("This is a one-time internet-connected setup step.")
-    snapshot_download(
-        repo_id=args.repo_id,
-        repo_type="model",
-        local_dir=str(tmp),
-        token=token,
-    )
+    print(f"📦 Syncing production model vault from: {args.repo_id}")
+    print(f"📁 Destination: {dest}")
 
-    # snapshot_download may create local metadata under .cache; it is not needed at runtime.
-    shutil.rmtree(tmp / ".cache", ignore_errors=True)
+    # Download directly to target directory so interrupted files resume rather than restart
+    max_retries = 10
+    for attempt in range(1, max_retries + 1):
+        try:
+            snapshot_download(
+                repo_id=args.repo_id,
+                repo_type="model",
+                local_dir=str(dest),
+                token=token,
+                max_workers=1,  # Critical: Single thread gives full bandwidth to 4.5GB model.bin
+                resume_download=True,
+            )
+            break
+        except Exception as e:
+            print(f"\n⚠️ Attempt {attempt}/{max_retries} encountered connection drop: {e}")
+            if attempt == max_retries:
+                print("❌ Max retries reached.", file=sys.stderr)
+                sys.exit(1)
+            print("⏳ Retrying and resuming incomplete files in 5 seconds...")
+            time.sleep(5)
 
-    validate(tmp)
-    tmp.rename(dest)
+    # Clean local cache metadata if present
+    shutil.rmtree(dest / ".cache", ignore_errors=True)
 
-    print("\n✅ Production models downloaded and validated")
-    print(f"   Local runtime vault: {dest}")
-    print("You can now remove Hugging Face credentials and disconnect internet after verification.")
+    validate(dest)
+    print("\n✅ All production models downloaded and validated successfully!")
 
 
 if __name__ == "__main__":
