@@ -34,9 +34,6 @@ init_db()
 
 PYTHON_BIN = sys.executable
 
-# IMPORTANT: bump this whenever ASR/translation logic or models change enough
-# that old results should not be reused. This prevents returning the earlier
-# low-quality beam_size=1 translations after the quality-first fix.
 PIPELINE_VERSION = "quality-v2-beam5-context"
 
 LANG_MAP = {
@@ -60,6 +57,12 @@ st.caption(
     "Offline pipeline: Text/Media → Whisper ASR (when needed) → "
     "IndicTrans2 → Sherpa-ONNX TTS → SRT/Video → Summary"
 )
+
+# Initialize Session State
+if "is_processing" not in st.session_state:
+    st.session_state.is_processing = False
+if "has_started" not in st.session_state:
+    st.session_state.has_started = False
 
 
 def summarize_transcript(texts: list[str]) -> str:
@@ -132,30 +135,17 @@ def generate_summary(translated_json: Path, target_lang: str) -> Path:
     return summary_path
 
 
-def stream_command(command: list[str], title: str, log_placeholder) -> str:
-    """Run a child process and stream combined stdout/stderr into Streamlit."""
-    lines = []
-    process = subprocess.Popen(
+def run_command(command: list[str], title: str) -> None:
+    """Run process silently without UI logs."""
+    process = subprocess.run(
         command,
         cwd=str(BASE_DIR),
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         text=True,
-        bufsize=1,
-        universal_newlines=True,
     )
-
-    assert process.stdout is not None
-    for line in iter(process.stdout.readline, ""):
-        line = line.rstrip("\n")
-        lines.append(line)
-        log_placeholder.code("\n".join(lines[-120:]), language="text")
-
-    return_code = process.wait()
-    output = "\n".join(lines)
-    if return_code != 0:
-        raise RuntimeError(f"{title} failed with exit code {return_code}.\n\n{output}")
-    return output
+    if process.returncode != 0:
+        raise RuntimeError(f"{title} failed with exit code {process.returncode}.\n\n{process.stderr}")
 
 
 def save_text_as_segments(text: str) -> Path:
@@ -180,7 +170,6 @@ def copy_if_exists(source: Optional[Path], destination: Path) -> Optional[Path]:
 
 
 def cache_path_to_db(path: Optional[Path]) -> Optional[str]:
-    """Store paths relative to project root so the Desktop repo is portable."""
     if path is None:
         return None
     try:
@@ -238,7 +227,7 @@ def render_results(
     cache_hit: bool,
 ) -> None:
     if cache_hit:
-        st.success("🎯 Cache hit — reused the previously completed result. No ASR/translation/TTS was rerun.")
+        st.success("🎯 Cache hit — reused the previously completed result.")
 
     segments = json.loads(translated_json.read_text(encoding="utf-8"))
     translated_texts = [
@@ -262,6 +251,7 @@ def render_results(
             data=translated_json.read_bytes(),
             file_name=translated_json.name,
             mime="application/json",
+            use_container_width=True,
         )
     with col2:
         if generate_tts and audio_path and audio_path.exists():
@@ -270,6 +260,7 @@ def render_results(
                 data=audio_path.read_bytes(),
                 file_name=audio_path.name,
                 mime="audio/wav",
+                use_container_width=True,
             )
     with col3:
         if generate_tts and srt_path and srt_path.exists():
@@ -278,6 +269,7 @@ def render_results(
                 data=srt_path.read_bytes(),
                 file_name=srt_path.name,
                 mime="text/plain",
+                use_container_width=True,
             )
 
     if summary_path and summary_path.exists():
@@ -306,10 +298,34 @@ def render_results(
         )
 
 
+def reset_translation():
+    st.session_state.is_processing = False
+    st.session_state.has_started = False
+
+
+def render_workflow(steps_state: dict):
+    """Renders the vertical step workflow in UI."""
+    st.subheader("📋 Workflow Steps")
+    for step_num, info in steps_state.items():
+        status_icon = "⏳"
+        if info["status"] == "running":
+            status_icon = "🔄"
+        elif info["status"] == "done":
+            status_icon = "✅"
+        elif info["status"] == "error":
+            status_icon = "❌"
+
+        st.markdown(f"**Step {step_num}: {info['name']}** — {status_icon} *{info['status'].title()}*")
+
+
 with st.sidebar:
     st.header("📋 Configuration")
 
-    input_mode = st.radio("Input Type", ["Audio / Video", "Text"])
+    input_mode = st.radio(
+        "Input Type",
+        ["Audio / Video", "Text"],
+        disabled=st.session_state.is_processing,
+    )
 
     uploaded_path = None
     uploaded_file_name = None
@@ -319,6 +335,8 @@ with st.sidebar:
         uploaded_file = st.file_uploader(
             "Upload audio or video",
             type=MEDIA_EXTENSIONS,
+            accept_multiple_files=False,  # Single item upload to avoid "+" icon
+            disabled=st.session_state.is_processing,
             help=(
                 "Video: MP4, MOV, AVI, WMV, MKV, FLV, WebM | "
                 "Audio: MP3, WAV, AAC, M4A, FLAC, WMA, OGG"
@@ -334,23 +352,34 @@ with st.sidebar:
             "Text to translate",
             height=180,
             placeholder="Enter English, Hindi or Marathi text...",
+            disabled=st.session_state.is_processing,
         )
 
     st.divider()
-    source_name = st.selectbox("Source Language", list(LANG_MAP.keys()), index=0)
-    target_name = st.selectbox("Target Language", list(LANG_MAP.keys()), index=1)
+    source_name = st.selectbox(
+        "Source Language",
+        list(LANG_MAP.keys()),
+        index=0,
+        disabled=st.session_state.is_processing,
+    )
+    target_name = st.selectbox(
+        "Target Language",
+        list(LANG_MAP.keys()),
+        index=1,
+        disabled=st.session_state.is_processing,
+    )
     source_lang = LANG_MAP[source_name]
     target_lang = LANG_MAP[target_name]
 
     if source_lang == target_lang:
         st.warning("Source and target languages must be different.")
 
-    generate_tts = st.checkbox("Generate translated voice", value=True)
-    generate_summary_option = st.checkbox("Generate summary", value=True)
-    burn_subtitles = st.checkbox("Burn subtitles into video", value=False)
+    generate_tts = st.checkbox("Generate translated voice", value=True, disabled=st.session_state.is_processing)
+    generate_summary_option = st.checkbox("Generate summary", value=True, disabled=st.session_state.is_processing)
+    burn_subtitles = st.checkbox("Burn subtitles into video", value=False, disabled=st.session_state.is_processing)
 
     valid_input = bool(uploaded_path) if input_mode == "Audio / Video" else bool(text_input.strip())
-    can_start = valid_input and source_lang != target_lang
+    can_start = valid_input and source_lang != target_lang and not st.session_state.is_processing
 
     start = st.button(
         "🚀 Start Translation",
@@ -359,22 +388,41 @@ with st.sidebar:
         disabled=not can_start,
     )
 
-if not can_start and not start:
+    # Show Reset button below Start Translation once translation process has started/completed
+    if st.session_state.has_started:
+        st.button(
+            "🔄 Reset / New Translation",
+            use_container_width=True,
+            on_click=reset_translation,
+        )
+
+if not can_start and not start and not st.session_state.has_started:
     st.info("Choose different source/target languages and provide an input to begin.")
 
 if start:
+    st.session_state.is_processing = True
+    st.session_state.has_started = True
+    st.rerun()
+
+if st.session_state.has_started and st.session_state.is_processing:
     progress = st.progress(0)
-    status = st.empty()
-    log_area = st.empty()
-    all_logs = []
+    workflow_container = st.empty()
+
+    # Define dynamic workflow steps based on options
+    steps_state = {
+        1: {"name": "Speech Recognition / Text Setup", "status": "pending"},
+        2: {"name": f"Translation ({source_name} → {target_name})", "status": "pending"},
+        3: {"name": "Speech Synthesis (TTS & SRT)", "status": "pending" if generate_tts else "skipped"},
+        4: {"name": "Final Muxing & Summary", "status": "pending"},
+    }
+
+    with workflow_container.container():
+        render_workflow(steps_state)
 
     try:
-        # ------------------------------------------------------------------
-        # Build exact cache key BEFORE any expensive model work.
-        # ------------------------------------------------------------------
+        # Cache Check
         if input_mode == "Audio / Video":
             assert uploaded_path is not None
-            status.info("🔎 Checking cache...")
             input_hash = compute_file_hash(str(uploaded_path))
             input_type = "media"
             extension = uploaded_path.suffix.lower().lstrip(".")
@@ -407,8 +455,14 @@ if start:
             require_summary=generate_summary_option,
             require_video=require_video,
         ):
+            for step_key in steps_state:
+                if steps_state[step_key]["status"] != "skipped":
+                    steps_state[step_key]["status"] = "done"
+
+            with workflow_container.container():
+                render_workflow(steps_state)
+
             progress.progress(100)
-            status.success("🎯 Cached result found")
             render_results(
                 translated_json=db_path_to_path(cached["translated_json_path"]),
                 target_lang=target_lang,
@@ -419,60 +473,57 @@ if start:
                 final_video=db_path_to_path(cached.get("video_path")),
                 cache_hit=True,
             )
+            st.session_state.is_processing = False
             st.stop()
+
         elif cached:
-            # Row exists but one or more cached artifact files were removed.
             delete_ui_cached_result(cache_key)
 
-        # ------------------------------------------------------------------
-        # CACHE MISS: run the real pipeline.
-        # ------------------------------------------------------------------
-        st.info("🆕 Cache miss — running the offline pipeline.")
+        # Stage 1: Speech Recognition or text preparation
+        steps_state[1]["status"] = "running"
+        with workflow_container.container():
+            render_workflow(steps_state)
 
-        # Stage 1: ASR or text preparation
         if input_mode == "Audio / Video":
-            status.info("🎙️ Stage 1/4: Speech recognition")
-            progress.progress(5)
-            all_logs.append(
-                stream_command(
-                    [
-                        PYTHON_BIN,
-                        str(BASE_DIR / "run_step1_asr.py"),
-                        str(uploaded_path),
-                        "--lang",
-                        source_lang,
-                        "--beam_size",
-                        "5",
-                        "--threads",
-                        "8",
-                    ],
-                    "ASR",
-                    log_area,
-                )
-            )
-        else:
-            status.info("📝 Stage 1/4: Preparing text input")
-            save_text_as_segments(text_input)
-            log_area.code("Text input prepared. Whisper skipped.", language="text")
-
-        progress.progress(25)
-
-        # Stage 2: Translation - ALL SIX COMBINATIONS
-        status.info(f"🌐 Stage 2/4: {source_name} → {target_name}")
-        translated_json = OUTPUTS_DIR / "step2_offline_translated.json"
-        all_logs.append(
-            stream_command(
+            progress.progress(10)
+            run_command(
                 [
                     PYTHON_BIN,
-                    str(BASE_DIR / "run_step1_translation.py"),
-                    str(OUTPUTS_DIR / "step1_whisper_output.json"),
-                    target_lang,
+                    str(BASE_DIR / "run_step1_asr.py"),
+                    str(uploaded_path),
+                    "--lang",
                     source_lang,
+                    "--beam_size",
+                    "5",
+                    "--threads",
+                    "8",
                 ],
-                "Translation",
-                log_area,
+                "ASR",
             )
+        else:
+            save_text_as_segments(text_input)
+
+        steps_state[1]["status"] = "done"
+        progress.progress(25)
+
+        # Stage 2: Translation
+        steps_state[2]["status"] = "running"
+        with workflow_container.container():
+            render_workflow(steps_state)
+
+        translated_json = OUTPUTS_DIR / "step2_offline_translated.json"
+        run_command(
+            [
+                PYTHON_BIN,
+                str(BASE_DIR / "run_step1_translation.py"),
+                str(OUTPUTS_DIR / "step1_whisper_output.json"),
+                target_lang,
+                source_lang,
+            ],
+            "Translation",
         )
+
+        steps_state[2]["status"] = "done"
         progress.progress(50)
 
         # Stage 3: TTS + SRT
@@ -480,28 +531,30 @@ if start:
         audio_path = OUTPUTS_DIR / f"video_dubbed_{target_lang}.wav"
 
         if generate_tts:
-            status.info(f"🎤 Stage 3/4: {target_name} speech synthesis")
-            all_logs.append(
-                stream_command(
-                    [
-                        PYTHON_BIN,
-                        str(BASE_DIR / "run_step2_tts_srt.py"),
-                        str(translated_json),
-                        target_lang,
-                    ],
-                    "TTS/SRT",
-                    log_area,
-                )
+            steps_state[3]["status"] = "running"
+            with workflow_container.container():
+                render_workflow(steps_state)
+
+            run_command(
+                [
+                    PYTHON_BIN,
+                    str(BASE_DIR / "run_step2_tts_srt.py"),
+                    str(translated_json),
+                    target_lang,
+                ],
+                "TTS/SRT",
             )
-        else:
-            status.info("📄 Stage 3/4: Voice generation skipped")
+            steps_state[3]["status"] = "done"
 
         progress.progress(75)
 
-        # Stage 4: video muxing / summary
+        # Stage 4: Video Muxing & Summary
+        steps_state[4]["status"] = "running"
+        with workflow_container.container():
+            render_workflow(steps_state)
+
         final_video = None
         if require_video:
-            status.info("🎬 Stage 4/4: Video muxing")
             mux_cmd = [
                 PYTHON_BIN,
                 str(BASE_DIR / "test_video_muxing.py"),
@@ -510,24 +563,22 @@ if start:
             ]
             if burn_subtitles:
                 mux_cmd.append("--burn-subs")
-            all_logs.append(stream_command(mux_cmd, "Video muxing", log_area))
+            run_command(mux_cmd, "Video muxing")
             candidate = OUTPUTS_DIR / f"final_translated_video_{target_lang}.mp4"
             if candidate.exists():
                 final_video = candidate
-        else:
-            status.info("✅ Stage 4/4: Finalizing outputs")
 
         summary_path = None
         if generate_summary_option:
             summary_path = generate_summary(translated_json, target_lang)
 
+        steps_state[4]["status"] = "done"
+        with workflow_container.container():
+            render_workflow(steps_state)
+
         progress.progress(90)
 
-        # ------------------------------------------------------------------
-        # Save immutable copies of the artifacts into this cache entry.
-        # Fixed pipeline output names can be overwritten by the next job,
-        # so cached results MUST use their own directory.
-        # ------------------------------------------------------------------
+        # Cache artifacts
         cache_entry_dir = CACHE_DIR / cache_key
         cache_entry_dir.mkdir(parents=True, exist_ok=True)
 
@@ -583,7 +634,7 @@ if start:
         )
 
         progress.progress(100)
-        status.success("✅ Processing completed and cached")
+        st.session_state.is_processing = False
 
         render_results(
             translated_json=cached_translation,
@@ -596,13 +647,8 @@ if start:
             cache_hit=False,
         )
 
-        with st.expander("📜 Final processing log", expanded=False):
-            st.code(
-                "\n\n".join(all_logs) if all_logs else "No subprocess log was produced.",
-                language="text",
-            )
-
     except Exception as exc:
         progress.progress(0)
-        status.error("❌ Processing failed")
+        st.session_state.is_processing = False
+        st.error("❌ Processing failed")
         st.exception(exc)
