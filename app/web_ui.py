@@ -47,15 +47,14 @@ AUDIO_EXTENSIONS = {"mp3", "wav", "aac", "m4a", "flac", "wma", "ogg"}
 MEDIA_EXTENSIONS = sorted(VIDEO_EXTENSIONS | AUDIO_EXTENSIONS)
 
 st.set_page_config(
-    page_title="BAIF Offline Translation Engine",
+    page_title="Team Anuwad | BAIF Translation Studio",
     page_icon="🎙️",
     layout="wide",
 )
 
-st.title("🎙️ BAIF Offline Translation, Dubbing & Summary Engine")
+st.title("🎙️ BAIF Anuwad Studio (अनुवाद)")
 st.caption(
-    "Offline pipeline: Text/Media → Whisper ASR (when needed) → "
-    "IndicTrans2 → Sherpa-ONNX TTS → SRT/Video → Summary"
+    "Developed by **Team Anuwad** "
 )
 
 # Initialize Session State
@@ -236,42 +235,6 @@ def render_results(
         or ""
         for segment in segments
     ]
-
-    st.subheader("🌐 Translated Text")
-    st.text_area(
-        "Translation",
-        value="\n".join(text for text in translated_texts if text),
-        height=220,
-    )
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.download_button(
-            "⬇️ Translation JSON",
-            data=translated_json.read_bytes(),
-            file_name=translated_json.name,
-            mime="application/json",
-            use_container_width=True,
-        )
-    with col2:
-        if generate_tts and audio_path and audio_path.exists():
-            st.download_button(
-                "⬇️ Dubbed Audio",
-                data=audio_path.read_bytes(),
-                file_name=audio_path.name,
-                mime="audio/wav",
-                use_container_width=True,
-            )
-    with col3:
-        if generate_tts and srt_path and srt_path.exists():
-            st.download_button(
-                "⬇️ SRT Subtitles",
-                data=srt_path.read_bytes(),
-                file_name=srt_path.name,
-                mime="text/plain",
-                use_container_width=True,
-            )
-
     if summary_path and summary_path.exists():
         st.subheader("📝 Summary")
         summary_text = summary_path.read_text(encoding="utf-8")
