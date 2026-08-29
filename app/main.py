@@ -24,8 +24,8 @@ except ModuleNotFoundError:
     from modules.inference import PipelineInferenceEngine
 
 app = FastAPI(
-    title="BAIF Offline Translation API",
-    description="Air-gapped backend API for multilingual translation & TTS synthesis",
+    title="Team Anuwad - BAIF Offline Translation Engine",
+    description="Air-gapped backend API for multilingual translation & TTS synthesis developed by Team Anuwad",
     version="1.0.0"
 )
 
