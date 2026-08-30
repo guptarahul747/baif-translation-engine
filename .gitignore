@@ -5,10 +5,14 @@ env/
 
 # ── AI Model Vault (large binary files ~2.1 GB) ───
 local_model_vault/
+deployment_model_vault/
 
 # ── Storage Vault (user media files) ─────────────
 storage_vault/inputs/
 storage_vault/outputs/
+storage_vault/cache/
+storage_vault/stage_cache/
+storage_vault/test_outputs/
 
 # ── Database ──────────────────────────────────────
 *.db
@@ -26,6 +30,10 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+
+# ── Generated Presentation Previews ───────────────
+*.pptx.inspect.ndjson
+BAIF_Anuwad_Studio_Technology_Overview/
 
 # ── Build Artifacts ───────────────────────────────
 build/

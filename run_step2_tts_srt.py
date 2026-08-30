@@ -1,5 +1,6 @@
 import datetime
 import json
+import os
 import re
 import sys
 import time
@@ -20,6 +21,11 @@ TTS_FOLDERS = {
     "hi": "hindi",
     "mr": "marathi",
 }
+
+TTS_TIMING_MODES = {"continuous", "compact", "source"}
+COMPACT_LEADING_PAUSE_SECONDS = 0.5
+COMPACT_BASE_PAUSE_SECONDS = 0.18
+COMPACT_MAX_PAUSE_SECONDS = 1.25
 
 
 def normalize_tts_text(text: str, target_lang: str) -> str:
@@ -85,7 +91,7 @@ def get_tts_engine(target_lang: str) -> sherpa_onnx.OfflineTts:
     )
     model_config = sherpa_onnx.OfflineTtsModelConfig(
         vits=vits_config,
-        num_threads=4,
+        num_threads=min(8, max(1, os.cpu_count() or 4)),
         provider="cpu",
     )
     engine = sherpa_onnx.OfflineTts(
@@ -96,10 +102,82 @@ def get_tts_engine(target_lang: str) -> sherpa_onnx.OfflineTts:
     return engine
 
 
-def generate_srt_and_audio(input_json_path: str, target_lang: str = "hi"):
+def build_tts_timeline(
+    clips: list[dict],
+    sample_rate: int,
+    timing_mode: str = "compact",
+) -> tuple[np.ndarray, float]:
+    """
+    Assemble generated clips without repeatedly copying the whole waveform.
+
+    ``continuous`` is the downloadable audio: generated clips are joined with
+    no artificial silence. ``compact`` keeps a short natural pause plus a
+    capped source-scene gap.
+    ``source`` retains the old absolute timestamp alignment for users who need
+    the dubbed track to follow the original video timing exactly.
+    """
+    if timing_mode not in TTS_TIMING_MODES:
+        raise ValueError("TTS timing mode must be one of: continuous, compact, source")
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be greater than zero")
+
+    parts = []
+    timeline_samples = 0
+    inserted_silence_samples = 0
+    previous_source_end = None
+
+    for clip in clips:
+        samples = np.asarray(clip["samples"], dtype=np.float32)
+        if samples.size == 0:
+            continue
+
+        source_start = max(0.0, float(clip.get("start", 0.0)))
+        source_end = max(source_start, float(clip.get("end", source_start)))
+
+        if timing_mode == "source":
+            desired_start = int(round(source_start * sample_rate))
+            pause_samples = max(0, desired_start - timeline_samples)
+        elif timing_mode == "continuous":
+            pause_samples = 0
+        elif previous_source_end is None:
+            pause_seconds = min(source_start, COMPACT_LEADING_PAUSE_SECONDS)
+            pause_samples = int(round(pause_seconds * sample_rate))
+        else:
+            source_gap = max(0.0, source_start - previous_source_end)
+            pause_seconds = min(
+                COMPACT_MAX_PAUSE_SECONDS,
+                COMPACT_BASE_PAUSE_SECONDS + source_gap,
+            )
+            pause_samples = int(round(pause_seconds * sample_rate))
+
+        if pause_samples:
+            parts.append(np.zeros(pause_samples, dtype=np.float32))
+            timeline_samples += pause_samples
+            inserted_silence_samples += pause_samples
+
+        parts.append(samples)
+        timeline_samples += samples.size
+        previous_source_end = source_end
+
+    if not parts:
+        return np.array([], dtype=np.float32), 0.0
+
+    return (
+        np.concatenate(parts),
+        inserted_silence_samples / float(sample_rate),
+    )
+
+
+def generate_srt_and_audio(
+    input_json_path: str,
+    target_lang: str = "hi",
+    timing_mode: str = "continuous",
+):
     target_lang = target_lang.lower()
     if target_lang not in TTS_FOLDERS:
         raise ValueError("Supported target languages: en, hi, mr")
+    if timing_mode not in TTS_TIMING_MODES:
+        raise ValueError("TTS timing mode must be one of: continuous, compact, source")
 
     input_path = Path(input_json_path).resolve()
     if not input_path.exists():
@@ -116,6 +194,7 @@ def generate_srt_and_audio(input_json_path: str, target_lang: str = "hi"):
     print(f"🎤 STAGE 3: TTS + SRT ({target_lang.upper()})", flush=True)
     print("=" * 64, flush=True)
     print(f"Segments: {len(segments)}", flush=True)
+    print(f"Audio pacing: {timing_mode}", flush=True)
 
     subtitles = []
     for index, segment in enumerate(segments, start=1):
@@ -141,7 +220,7 @@ def generate_srt_and_audio(input_json_path: str, target_lang: str = "hi"):
 
     engine = get_tts_engine(target_lang)
     sample_rate = None
-    timeline = np.array([], dtype=np.float32)
+    generated_clips = []
 
     t0 = time.perf_counter()
     for index, segment in enumerate(segments, start=1):
@@ -168,22 +247,44 @@ def generate_srt_and_audio(input_json_path: str, target_lang: str = "hi"):
         if sample_rate is None:
             sample_rate = int(audio.sample_rate)
 
-        desired_start = int(float(segment.get("start", 0.0)) * sample_rate)
-        if timeline.size < desired_start:
-            timeline = np.pad(timeline, (0, desired_start - timeline.size))
+        generated_clips.append(
+            {
+                "samples": samples,
+                "start": float(segment.get("start", 0.0)),
+                "end": float(segment.get("end", segment.get("start", 0.0))),
+            }
+        )
 
-        # Avoid overwriting previously generated audio. If the previous spoken
-        # segment runs long, append the next one immediately after it.
-        timeline = np.concatenate([timeline, samples])
+    if sample_rate is None:
+        raise RuntimeError("TTS generated no audio samples")
 
-    if sample_rate is None or timeline.size == 0:
+    # The downloadable track contains no inserted pauses. Build the video
+    # track from the same generated clips, aligned to original timestamps, so
+    # it follows the source video without re-running speech synthesis.
+    timeline, inserted_silence = build_tts_timeline(
+        generated_clips,
+        sample_rate,
+        timing_mode=timing_mode,
+    )
+    video_timeline, video_inserted_silence = build_tts_timeline(
+        generated_clips,
+        sample_rate,
+        timing_mode="source",
+    )
+
+    if timeline.size == 0:
         raise RuntimeError("TTS generated no audio samples")
 
     wav_path = OUTPUT_DIR / f"video_dubbed_{target_lang}.wav"
+    video_wav_path = OUTPUT_DIR / f"video_dubbed_{target_lang}_video_timed.wav"
     sf.write(str(wav_path), timeline, sample_rate)
+    sf.write(str(video_wav_path), video_timeline, sample_rate)
 
     print(f"✅ TTS completed in {time.perf_counter() - t0:.2f}s", flush=True)
+    print(f"⏸️ Inserted pause time: {inserted_silence:.2f}s", flush=True)
     print(f"🔊 WAV generated: {wav_path}", flush=True)
+    print(f"🎬 Video-timed WAV generated: {video_wav_path}", flush=True)
+    print(f"⏸️ Video pause time: {video_inserted_silence:.2f}s", flush=True)
     print("=" * 64, flush=True)
     return srt_path, wav_path
 
@@ -191,4 +292,9 @@ def generate_srt_and_audio(input_json_path: str, target_lang: str = "hi"):
 if __name__ == "__main__":
     input_file = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_INPUT)
     target_language = sys.argv[2] if len(sys.argv) > 2 else "hi"
-    generate_srt_and_audio(input_file, target_lang=target_language)
+    audio_timing = sys.argv[3] if len(sys.argv) > 3 else "continuous"
+    generate_srt_and_audio(
+        input_file,
+        target_lang=target_language,
+        timing_mode=audio_timing,
+    )

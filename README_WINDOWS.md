@@ -1,322 +1,147 @@
-# BAIF Offline Translation Engine — Windows Fresh Installation
+# BAIF Anuwad Studio — Windows Installation and Handover
 
-This is the recommended guide for the **final BAIF Windows machine**.
+This is the production guide for the final BAIF Windows laptop. After installation, the application runs fully offline: no HSBC systems, cloud APIs, account login, or internet connection is used during normal translation.
 
-It installs the stable last-known-good pipeline and downloads the exact verified model vault while internet is temporarily available. After verification, the application runs offline.
+## Final laptop requirements
 
-## Final runtime capabilities
+- Windows 10/11 x64, 16 GB RAM or more, and at least 15 GB free storage
+- Python 3.12 x64
+- FFmpeg x64 (`ffmpeg` and `ffprobe` available on `PATH`)
+- Microsoft Visual C++ 2015–2022 Redistributable x64
+- BAIF application source and the approved `local_model_vault`
 
-- Fully offline after first-time setup
-- English, Hindi and Marathi
-- All 6 translation directions
-- Hindi ↔ Marathi through the proven English pivot
-- Offline Whisper ASR
-- Offline IndicTrans2 CTranslate2 translation
-- Offline English/Hindi/Marathi TTS
-- Text/audio/video UI
-- subtitles, dubbed output and optional summary
-- persistent completed-result cache
-
----
-
-## 0. Values needed before setup
-
-Have these ready:
-
-```text
-REPO_URL=<your Git repository URL>
-BRANCH=<your deployment branch>
-MODEL_REPO_ID=<private Hugging Face model repo prepared with MODEL_DISTRIBUTION_GUIDE.md>
-```
-
-The Windows PC needs internet only for initial software/package/model installation.
-
----
-
-## 1. Install system prerequisites
-
-Install BAIF-approved x64 versions of:
-
-1. **Git for Windows**
-2. **Python 3.12 x64**
-3. **FFmpeg x64**
-4. **Microsoft Visual C++ 2015–2022 Redistributable x64**
-
-During Python installation, enable the option to add Python to PATH if your BAIF policy allows it.
-
-For FFmpeg, add its `bin` directory to Windows PATH, for example:
-
-```text
-C:\ffmpeg\bin
-```
-
-Open a **new PowerShell** window after installation and verify:
-
-```powershell
-git --version
-py -3.12 --version
-ffmpeg -version
-ffprobe -version
-```
-
-Python should be `3.12.x`.
-
----
-
-## 2. Clone the repository
-
-Choose an approved local directory, for example:
-
-```powershell
-New-Item -ItemType Directory -Force C:\BAIF | Out-Null
-Set-Location C:\BAIF
-
-git clone <REPO_URL>
-Set-Location .\baif-translation-engine
-git checkout <BRANCH>
-```
-
-Verify:
-
-```powershell
-git branch --show-current
-```
-
----
-
-## 3. Create the virtual environment
-
-```powershell
-py -3.12 -m venv .venv
-```
-
-You do **not** have to activate the environment. Using its Python executable directly avoids PowerShell execution-policy issues.
-
-Verify:
-
-```powershell
-.\.venv\Scripts\python.exe --version
-```
-
----
-
-## 4. Install Python dependencies
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pip install -r requirements-setup.txt
-.\.venv\Scripts\python.exe -m pip check
-```
-
-`requirements-setup.txt` is used only for the first-time model download utility.
-
----
-
-## 5. Download the exact production models
-
-The stable production vault should already have been published to a private Hugging Face model repository using `MODEL_DISTRIBUTION_GUIDE.md`.
-
-### Recommended — temporary token in the current PowerShell session
-
-```powershell
-$env:BAIF_MODEL_REPO_ID = "<MODEL_REPO_ID>"
-$env:HF_TOKEN = "hf_your_read_token"
-
-.\.venv\Scripts\python.exe download_production_models.py
-```
-
-After successful download:
-
-```powershell
-Remove-Item Env:HF_TOKEN
-```
-
-You may also remove the repo ID environment variable after setup:
-
-```powershell
-Remove-Item Env:BAIF_MODEL_REPO_ID
-```
-
-The script creates:
-
-```text
-C:\BAIF\baif-translation-engine\local_model_vault\
-├── whisper\
-├── indictrans2\
-│   ├── en-indic\
-│   └── indic-en\
-└── tts\
-    ├── english\
-    ├── hindi\
-    └── marathi\
-```
-
-The stable production build does **not** require the experimental Indic-Indic 320M model.
-
----
-
-## 6. Run the installation pre-flight
-
-```powershell
-.\.venv\Scripts\python.exe verify_installation.py
-```
-
-Expected ending:
-
-```text
-✅ Pre-flight passed.
-Next: python verify_all_models.py
-```
-
----
-
-## 7. Run full model verification
-
-```powershell
-.\.venv\Scripts\python.exe verify_all_models.py
-```
-
-Confirm:
-
-```text
-Whisper ASR Engine       ✅
-6/6 NMT combinations     ✅
-3/3 TTS voice engines    ✅
-```
-
-If any required model fails, fix it before internet access is removed.
-
----
-
-## 8. Start the Streamlit application
-
-```powershell
-.\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
-```
-
-Open:
-
-```text
-http://localhost:8501
-```
-
-The stable UI runs the pipeline scripts directly. Do **not** start FastAPI/Uvicorn separately for this deployment.
-
----
-
-## 9. End-to-end setup test while internet is still available
-
-Test at minimum:
-
-1. English → Hindi
-2. English → Marathi
-3. Hindi → English
-4. Marathi → English
-5. Hindi → Marathi
-6. Marathi → Hindi
-7. one English TTS output
-8. one Hindi TTS output
-9. one Marathi TTS output
-10. a short video with dubbed/subtitle output
-11. run the exact same job twice and confirm the second run uses the cache
-
----
-
-## 10. Prove the final machine is offline-capable
-
-After all verification passes:
-
-1. remove `HF_TOKEN`
-2. remove any saved Hugging Face credentials if you used interactive login
-3. disconnect network/internet
-4. restart Streamlit
-5. process a **new uncached** file
-
-```powershell
-.\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
-```
-
-The new translation must work with no network connection.
-
----
-
-## 11. Normal daily Windows startup
+## Normal daily startup
 
 ```powershell
 Set-Location C:\BAIF\baif-translation-engine
 .\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
 ```
 
-No internet, Hugging Face token or Python-environment activation is required for normal runtime.
+Open `http://localhost:8501`. Internet is not required.
 
----
+## Method 1 — Prepared USB drive (no internet on final laptop)
 
-## Optional PowerShell activation
+Use this method when the final BAIF laptop must never be connected to the internet.
 
-If BAIF policy permits PowerShell scripts:
+### Prepare the USB drive on a staging Windows PC
 
-```powershell
-.\.venv\Scripts\Activate.ps1
+The staging PC must be Windows x64 with Python 3.12 x64. It may use internet once.
+
+1. Create this layout on the USB drive:
+
+```text
+BAIF_INSTALL/
+  baif-translation-engine/  application source and approved local_model_vault
+  wheelhouse/               offline Python package wheels
+  installers/               Python, FFmpeg, VC++ and optional Git installers
 ```
 
-If execution policy blocks it, do not change corporate policy just for this project; use `.\.venv\Scripts\python.exe` commands shown above.
+2. Copy a clean application source folder to `BAIF_INSTALL/baif-translation-engine`. Do not copy `.venv`, `storage_vault`, `__pycache__`, caches, or user media.
 
----
+3. Copy the approved and verified production vault to `BAIF_INSTALL/baif-translation-engine/local_model_vault`. It must contain Whisper, `indictrans2/en-indic`, `indictrans2/indic-en`, and English/Hindi/Marathi TTS folders.
 
-## Troubleshooting
-
-### `py -3.12` does not work
-
-Confirm Python 3.12 x64 is installed. On some managed machines use:
+4. Download all runtime package wheels to the USB, using the same Python version and architecture as the final laptop:
 
 ```powershell
-python --version
+py -3.12 -m pip download --only-binary=:all: --dest E:\BAIF_INSTALL\wheelhouse -r requirements.txt
 ```
 
-If `python` is Python 3.12, create the environment with:
+Replace `E:` with the USB drive letter. Include Python 3.12 x64, FFmpeg x64, and the VC++ Redistributable x64 installers under `installers`.
+
+### Install on the final BAIF laptop
+
+1. Copy the application folder from USB to `C:\BAIF\baif-translation-engine`.
+2. Install Python 3.12 x64, FFmpeg x64, and VC++ from the USB. Add the FFmpeg `bin` directory to `PATH`.
+3. Open a new PowerShell window and verify:
 
 ```powershell
-python -m venv .venv
+py -3.12 --version
+ffmpeg -version
+ffprobe -version
 ```
 
-### `ffmpeg` is not recognized
-
-Confirm the FFmpeg `bin` folder is on PATH, close PowerShell and open a new window.
+4. Create the environment and install only from the USB wheelhouse:
 
 ```powershell
-where.exe ffmpeg
-where.exe ffprobe
+Set-Location C:\BAIF\baif-translation-engine
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --no-index --find-links E:\BAIF_INSTALL\wheelhouse -r requirements.txt
+.\.venv\Scripts\python.exe -m pip check
 ```
 
-### Import/DLL error when loading native packages
-
-Confirm the Microsoft Visual C++ 2015–2022 Redistributable **x64** is installed, then reopen PowerShell/restart Windows if required.
-
-### Private model repo returns 401/403
-
-Check:
-
-- token has read permission
-- token/account has access to the private model repository
-- `MODEL_REPO_ID` is correct
-
-### Re-download intentionally
-
-Only if the local vault is known to be incomplete/corrupt:
+5. Verify and start:
 
 ```powershell
-.\.venv\Scripts\python.exe download_production_models.py --force
+.\.venv\Scripts\python.exe verify_installation.py
+.\.venv\Scripts\python.exe verify_all_models.py
+.\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
 ```
 
-### Port 8501 already in use
+Process one new short audio/video file as the final acceptance test. No Hugging Face token, Git login, or internet is needed for this method.
+
+## Method 2 — One-time internet setup
+
+Use this method only when the final laptop is allowed temporary internet during setup.
+
+### 1. Install local prerequisites
+
+Install BAIF-approved versions of Python 3.12 x64 (enable **Add python.exe to PATH**), Git for Windows, FFmpeg x64, and Microsoft Visual C++ 2015–2022 Redistributable x64. Add the FFmpeg `bin` folder to `PATH`.
+
+Verify in a new PowerShell window:
 
 ```powershell
-.\.venv\Scripts\python.exe -m streamlit run app\web_ui.py --server.port 8502
+py -3.12 --version
+git --version
+ffmpeg -version
+ffprobe -version
 ```
 
----
+### 2. Download the application and packages
 
-## 12. Third-party model licensing
+```powershell
+New-Item -ItemType Directory -Force C:\BAIF | Out-Null
+Set-Location C:\BAIF
+git clone <REPO_URL> baif-translation-engine
+Set-Location .\baif-translation-engine
+git checkout <BRANCH>
 
-Before production handover, review `MODEL_LICENSE_NOTES.md`. Individual TTS voices can have terms that differ from the repository-level license.
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-setup.txt
+.\.venv\Scripts\python.exe -m pip check
+```
+
+### 3. Download the approved model vault once
+
+Use a temporary read-only Hugging Face token only in the current PowerShell session:
+
+```powershell
+$env:BAIF_MODEL_REPO_ID = "<MODEL_REPO_ID>"
+$env:HF_TOKEN = "hf_your_read_token"
+.\.venv\Scripts\python.exe download_production_models.py
+```
+
+### 4. Verify, remove credentials, and prove offline use
+
+```powershell
+.\.venv\Scripts\python.exe verify_installation.py
+.\.venv\Scripts\python.exe verify_all_models.py
+Remove-Item Env:HF_TOKEN -ErrorAction SilentlyContinue
+Remove-Item Env:BAIF_MODEL_REPO_ID -ErrorAction SilentlyContinue
+```
+
+Disconnect internet. Start the app and process a **new uncached** file:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
+```
+
+If that succeeds, the final laptop is ready for offline BAIF use.
+
+## Operating notes
+
+- Configure Windows **Sleep** to **Never when plugged in** for production use. Locking the screen should not stop processing, but sleep, hibernation, and closing the lid can pause local applications.
+- Never copy a `.venv` between machines; create it locally.
+- Do not copy a previous `storage_vault`; it can contain user media and cached results.
+- Remove Hugging Face tokens and any internet credentials after handover.

@@ -1,5 +1,7 @@
-# BAIF Offline Translation Engine - stable runtime dependencies
-# Tested target: Python 3.12 x64 / arm64
+# BAIF Anuwad Studio — runtime dependencies only
+# Target: Python 3.12 x64 (Windows) or arm64/x64 (macOS).
+# These packages are required for normal offline translation. Build a matching
+# wheelhouse with this file when preparing the no-internet USB installation.
 
 streamlit==1.32.0
 faster-whisper==1.0.1

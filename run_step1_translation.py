@@ -21,6 +21,55 @@ SUPPORTED_LANGUAGES = set(LANG_CODES)
 SENTENCE_END_RE = re.compile(r"[.!?।॥][\"'”’)]*$")
 
 
+def normalized_token(token: str) -> str:
+    return re.sub(r"[^\w\u0900-\u097F]", "", token, flags=re.UNICODE).casefold()
+
+
+def collapse_repeated_phrases(text: str, max_phrase_words: int = 8) -> str:
+    """Remove consecutive repeated word groups from ASR or NMT output.
+
+    This specifically guards against decoder loops such as the same two-to-four
+    word phrase being generated dozens of times, while retaining the first
+    occurrence and normalising the remaining spacing.
+    """
+    tokens = clean_text(text).split()
+    result: list[str] = []
+    index = 0
+
+    while index < len(tokens):
+        best_length = 0
+        best_count = 1
+        limit = min(max_phrase_words, (len(tokens) - index) // 2)
+        for phrase_length in range(limit, 0, -1):
+            phrase = [normalized_token(token) for token in tokens[index:index + phrase_length]]
+            if not all(phrase):
+                continue
+            count = 1
+            while index + ((count + 1) * phrase_length) <= len(tokens):
+                candidate = [
+                    normalized_token(token)
+                    for token in tokens[
+                        index + (count * phrase_length):index + ((count + 1) * phrase_length)
+                    ]
+                ]
+                if candidate != phrase:
+                    break
+                count += 1
+            if count > 1:
+                best_length = phrase_length
+                best_count = count
+                break
+
+        if best_count > 1:
+            result.extend(tokens[index:index + best_length])
+            index += best_length * best_count
+        else:
+            result.append(tokens[index])
+            index += 1
+
+    return " ".join(result)
+
+
 def clean_text(text: str) -> str:
     if not text:
         return ""
@@ -147,13 +196,13 @@ class NativeIndicTranslator:
 
         print(
             f"🌐 {src_lang.upper()} → {tgt_lang.upper()} | "
-            f"{len(tokenized_inputs)} chunk(s) using {self.name} | beam=5",
+            f"{len(tokenized_inputs)} chunk(s) using {self.name} | beam=4",
             flush=True,
         )
         t0 = time.perf_counter()
         results = self.translator.translate_batch(
             tokenized_inputs,
-            beam_size=5,
+            beam_size=4,
             max_decoding_length=256,
         )
         print(f"✅ Translation pass finished in {time.perf_counter() - t0:.2f}s", flush=True)
@@ -173,7 +222,7 @@ class NativeIndicTranslator:
                 clean_tokens.append(token)
 
             translated = self.sp_tgt.decode_pieces(clean_tokens)
-            translations.append(clean_text(translated))
+            translations.append(collapse_repeated_phrases(translated))
 
         return translations
 
@@ -257,7 +306,7 @@ def translate_whisper_json(
     if len(segments) > 5:
         print(f"  ... {len(segments) - 5} more chunk(s)", flush=True)
 
-    texts = [(segment.get("text") or "").strip() for segment in segments]
+    texts = [collapse_repeated_phrases(segment.get("text") or "") for segment in segments]
     en_indic, indic_en = build_engines(src_lang, target_lang)
 
     t0 = time.perf_counter()

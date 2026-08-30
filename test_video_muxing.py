@@ -150,7 +150,12 @@ def merge_video_and_audio(
         print(f"❌ {e}")
         sys.exit(1)
 
-    audio_input = OUTPUT_DIR / f"video_dubbed_{target_lang}.wav"
+    # The downloadable WAV is continuous. Use the separately generated
+    # timestamp-aligned track for video so speech lands at the source scenes.
+    video_timed_audio = OUTPUT_DIR / f"video_dubbed_{target_lang}_video_timed.wav"
+    audio_input = video_timed_audio if video_timed_audio.exists() else (
+        OUTPUT_DIR / f"video_dubbed_{target_lang}.wav"
+    )
     srt_input = OUTPUT_DIR / f"video_subtitles_{target_lang}.srt"
 
     # Final browser-friendly MP4
@@ -251,6 +256,7 @@ def merge_video_and_audio(
             "-movflags", "+faststart",
 
             # Audio
+            "-af", "apad",
             "-c:a", "aac",
             "-b:a", "192k",
             "-ar", "48000",
@@ -295,6 +301,7 @@ def merge_video_and_audio(
             "-pix_fmt", "yuv420p",
 
             # AAC audio
+            "-af", "apad",
             "-c:a", "aac",
             "-b:a", "192k",
             "-ar", "48000",

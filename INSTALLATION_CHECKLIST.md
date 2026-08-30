@@ -11,6 +11,13 @@ Use this checklist on every BAIF machine before internet access is removed.
 - [ ] `download_production_models.py` present
 - [ ] `verify_installation.py` present
 
+## Installation method
+
+- [ ] USB/offline method: matching Python 3.12 x64 wheelhouse prepared and tested on staging PC
+- [ ] USB/offline method: approved `local_model_vault` copied to the package
+- [ ] USB/offline method: Python, FFmpeg, and VC++ x64 installers included
+- [ ] One-time internet method: temporary read-only Hugging Face token removed after model download
+
 ## System software
 
 - [ ] Python 3.12 x64/arm64 as appropriate
@@ -64,6 +71,8 @@ Use this checklist on every BAIF machine before internet access is removed.
 - [ ] internet disconnected
 - [ ] Streamlit restarts successfully offline
 - [ ] a **new uncached** translation works with internet disconnected
+- [ ] Windows laptop: Sleep is set to **Never when plugged in**
+- [ ] final operator has the normal startup command and the installation USB (if used)
 
 ## Final startup command
 
