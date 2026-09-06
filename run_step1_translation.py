@@ -7,6 +7,30 @@ from pathlib import Path
 import ctranslate2
 import sentencepiece as spm
 
+# Resilient dual-fallback import for Domain Lexicon
+try:
+    from app.modules.domain_lexicon import (
+        normalize_marathi_text,
+        normalize_hindi_text,
+        normalize_text,
+    )
+except ModuleNotFoundError:
+    try:
+        from domain_lexicon import (
+            normalize_marathi_text,
+            normalize_hindi_text,
+            normalize_text,
+        )
+    except ModuleNotFoundError:
+        def normalize_marathi_text(text: str) -> str:
+            return text.strip() if text else ""
+
+        def normalize_hindi_text(text: str) -> str:
+            return text.strip() if text else ""
+
+        def normalize_text(text: str, lang: str = "mr") -> str:
+            return text.strip() if text else ""
+
 BASE_DIR = Path(__file__).resolve().parent
 VAULT_DIR = BASE_DIR / "local_model_vault" / "indictrans2"
 DEFAULT_INPUT = BASE_DIR / "storage_vault" / "outputs" / "step1_whisper_output.json"
@@ -26,12 +50,7 @@ def normalized_token(token: str) -> str:
 
 
 def collapse_repeated_phrases(text: str, max_phrase_words: int = 8) -> str:
-    """Remove consecutive repeated word groups from ASR or NMT output.
-
-    This specifically guards against decoder loops such as the same two-to-four
-    word phrase being generated dozens of times, while retaining the first
-    occurrence and normalising the remaining spacing.
-    """
+    """Remove consecutive repeated word groups from ASR or NMT output."""
     tokens = clean_text(text).split()
     result: list[str] = []
     index = 0
@@ -83,13 +102,7 @@ def merge_segments_for_translation(
     max_chars: int = 280,
     max_duration_seconds: float = 18.0,
 ) -> list[dict]:
-    """
-    Merge adjacent Whisper fragments into sentence-like chunks before NMT.
-
-    IndicTrans2 generally produces better translations when it receives enough
-    linguistic context. We still keep timestamps by taking the first start and
-    last end time of each merged chunk.
-    """
+    """Merge adjacent Whisper fragments into sentence-like chunks before NMT."""
     merged: list[dict] = []
     buffer: list[dict] = []
 
@@ -131,7 +144,6 @@ def merge_segments_for_translation(
         current_text = clean_text(" ".join((item.get("text") or "").strip() for item in buffer))
         current_duration = float(buffer[-1].get("end", 0.0)) - float(buffer[0].get("start", 0.0))
 
-        # Prefer sentence boundaries, but do not translate tiny fragments alone.
         if (
             len(current_text) >= min_chars_before_sentence_break
             and SENTENCE_END_RE.search(current_text)
@@ -191,7 +203,6 @@ class NativeIndicTranslator:
 
         for text in texts:
             pieces = self.sp_src.encode((text or "").strip(), out_type=str)
-            # Match the translation format that passed verify_all_models.py.
             tokenized_inputs.append([src_tag, tgt_tag] + pieces)
 
         print(
@@ -204,6 +215,8 @@ class NativeIndicTranslator:
             tokenized_inputs,
             beam_size=4,
             max_decoding_length=256,
+            repetition_penalty=1.25,
+            no_repeat_ngram_size=3,
         )
         print(f"✅ Translation pass finished in {time.perf_counter() - t0:.2f}s", flush=True)
 
@@ -222,7 +235,15 @@ class NativeIndicTranslator:
                 clean_tokens.append(token)
 
             translated = self.sp_tgt.decode_pieces(clean_tokens)
-            translations.append(collapse_repeated_phrases(translated))
+            post_processed = collapse_repeated_phrases(translated)
+
+            # Target-side normalization to eliminate NMT hallucinations
+            if tgt_lang == "hi":
+                post_processed = normalize_hindi_text(post_processed)
+            elif tgt_lang == "mr":
+                post_processed = normalize_marathi_text(post_processed)
+
+            translations.append(clean_text(post_processed))
 
         return translations
 
@@ -288,13 +309,20 @@ def translate_whisper_json(
         raise ValueError("Input JSON must contain a list of transcript segments")
 
     print("=" * 64, flush=True)
-    print("🌐 STAGE 2: OFFLINE MACHINE TRANSLATION — QUALITY MODE", flush=True)
+    print("🌐 STAGE 2: OFFLINE MACHINE TRANSLATION — DOMAIN-AWARE MODE", flush=True)
     print("=" * 64, flush=True)
     print(f"Route requested: {src_lang.upper()} → {target_lang.upper()}", flush=True)
     print(f"Raw ASR segments: {len(raw_segments)}", flush=True)
 
-    # Text-input mode writes a single segment; media ASR usually creates many
-    # short fragments, so merge those fragments to give NMT more context.
+    # Pre-translation normalization: clean phonetic ASR errors & remove corrupted scripts
+    for seg in raw_segments:
+        raw_text = seg.get("text", "")
+        if src_lang == "mr":
+            seg["text"] = normalize_marathi_text(raw_text)
+        elif src_lang == "hi":
+            seg["text"] = normalize_hindi_text(raw_text)
+
+    # Merge adjacent fragments into contextual sentences
     if len(raw_segments) > 1:
         segments = merge_segments_for_translation(raw_segments)
     else:

@@ -26,6 +26,16 @@ from app.modules.database import (  # noqa: E402
     save_ui_cached_result,
 )
 
+# Resilient dual-fallback import for Domain Lexicon (zero visual footprint)
+try:
+    from app.modules.domain_lexicon import normalize_text
+except ModuleNotFoundError:
+    try:
+        from domain_lexicon import normalize_text
+    except ModuleNotFoundError:
+        def normalize_text(text: str, lang: str = "mr") -> str:
+            return text.strip() if text else ""
+
 INPUTS_DIR = BASE_DIR / "storage_vault" / "inputs"
 OUTPUTS_DIR = BASE_DIR / "storage_vault" / "outputs"
 CACHE_DIR = BASE_DIR / "storage_vault" / "cache"
@@ -39,7 +49,7 @@ PYTHON_BIN = sys.executable
 
 # IMPORTANT: bump this whenever ASR/translation logic or models change enough
 # that old results should not be reused.
-PIPELINE_VERSION = "quality-v8-balanced-ctranslate-cleanup"
+PIPELINE_VERSION = "quality-v11-consolidated-domain-lexicon"
 
 LANG_MAP = {
     "English": "en",
@@ -153,6 +163,7 @@ UI_COPY = {
 def t(key: str) -> str:
     return UI_COPY[st.session_state.get("ui_language", "en")].get(key, key)
 
+
 st.set_page_config(
     page_title="BAIF Offline Translation Engine",
     page_icon="🎙️",
@@ -179,8 +190,6 @@ for state_key, default_value in {
     if state_key not in st.session_state:
         st.session_state[state_key] = default_value
 
-# Read the stored choice before the page is rendered. The selector itself is
-# placed after the hero in the document and anchored into the application bar.
 st.session_state.ui_language = UI_LANGUAGES.get(
     st.session_state.get("ui_language_picker", "English"), "en"
 )
@@ -210,8 +219,6 @@ def start_keep_awake() -> None:
             start_new_session=True,
         )
     except (FileNotFoundError, OSError):
-        # The app remains usable on non-macOS machines where caffeinate is not
-        # available; deployment can use the platform's equivalent policy.
         st.session_state.keep_awake_process = None
 
 
@@ -222,9 +229,6 @@ def stop_keep_awake() -> None:
     st.session_state.keep_awake_process = None
 
 
-# Keep these actions directly above the BAIF heading. They are deliberately
-# part of the normal page layout so they cannot be hidden by Streamlit's
-# internal header markup.
 header_spacer, language_picker, stop_picker = st.columns([6.6, 1.8, 1.8])
 with language_picker:
     selected_ui_language = st.selectbox(
@@ -628,6 +632,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 def summarize_transcript(texts: list[str]) -> str:
     full_text = " ".join(texts).strip()
     if not full_text:
@@ -771,11 +776,12 @@ def stream_command(
     return output
 
 
-def save_text_as_segments(text: str) -> Path:
+def save_text_as_segments(text: str, lang: str = "mr") -> Path:
+    cleaned = normalize_text(text, lang=lang) if text else ""
     output = OUTPUTS_DIR / "step1_whisper_output.json"
     output.write_text(
         json.dumps(
-            [{"id": 1, "start": 0.0, "end": 1.0, "text": text.strip()}],
+            [{"id": 1, "start": 0.0, "end": 1.0, "text": cleaned}],
             ensure_ascii=False,
             indent=2,
         ),
@@ -1037,7 +1043,7 @@ with st.sidebar:
 
     if source_lang == target_lang:
         st.markdown(
-            f'<div class="baif-inline-notice">✅ {t("different_languages")}</div>',
+            f'<div class="baif-inline-notice">⚠️ {t("different_languages")}</div>',
             unsafe_allow_html=True,
         )
 
@@ -1196,7 +1202,7 @@ if start:
             )
         else:
             set_pipeline_progress(progress, status_line, 5, "Preparing your text")
-            save_text_as_segments(text_input)
+            save_text_as_segments(text_input, lang=source_lang)
 
         set_pipeline_progress(progress, status_line, 35, "Speech recognition complete")
 

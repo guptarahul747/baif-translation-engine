@@ -27,6 +27,25 @@ SUPPORTED_LOCALES = {
     "en": "en",
 }
 
+# Domain-specific initial prompts to anchor Whisper vocabulary
+INITIAL_PROMPTS = {
+    "mr": (
+        "शेळीपालन, शेळीपालक, पशुसखी, शेळीपालनाचे अर्थशास्त्र, चांदा ते बांदा, "
+        "उस्मानाबादी, संगमनेरी, कोकण कन्याळ, सुरती, बेरारी, पैदास, आहार, चारा, "
+        "गोठा व्यवस्थापन, सामान्य आजार, लाळ खुरकूत, देवीचा रोग, घटसर्प, जंतनाशक, "
+        "लसीकरण, परजीवी, प्रकल्प अहवाल, बँक कर्ज, भांडवल, नफा-तोटा."
+    ),
+    "hi": (
+        "बकरी पालन, पशुपालन, किसान, बकरी पालन का अर्थशास्त्र, चांदा ते बांदा, "
+        "उस्मानाबादी, संगमनेरी, सुरती, चारा, स्वास्थ्य, प्रबंधन, टीकाकरण, "
+        "कृमिनाशक, परियोजना रिपोर्ट, बैंक ऋण, पूंजी, लाभ-हानि."
+    ),
+    "en": (
+        "Goat rearing, livestock economics, animal husbandry, fodder, health care, "
+        "project report, bank loan, capital, profit, goat pox, FMD, vaccination, deworming."
+    ),
+}
+
 DEFAULT_CHUNK_SECONDS = 28.0
 DEFAULT_CHUNK_CONTEXT_SECONDS = 1.0
 WHISPER_AUDIO_WINDOW_SECONDS = 30.0
@@ -53,13 +72,7 @@ def normalize_word(word: str) -> str:
 
 
 def clean_repeated_words(text: str, max_consecutive: int = 2) -> str:
-    """
-    Reduce accidental consecutive Whisper repetition.
-
-    Examples:
-        "आहे आहे आहे आहे" -> "आहे आहे"
-        "yes yes yes yes" -> "yes yes"
-    """
+    """Reduce accidental consecutive Whisper repetition."""
     text = re.sub(r"\s+", " ", (text or "")).strip()
     if not text:
         return ""
@@ -106,14 +119,7 @@ def build_decode_windows(
     chunk_seconds: float = DEFAULT_CHUNK_SECONDS,
     context_seconds: float = DEFAULT_CHUNK_CONTEXT_SECONDS,
 ) -> list[tuple[float, float, float, float]]:
-    """
-    Return complete, ordered decode windows.
-
-    Each tuple contains ``(core_start, core_end, window_start, window_end)``.
-    The core regions cover the audio exactly once. Context on either side avoids
-    losing words cut by a chunk boundary, while midpoint ownership prevents
-    duplicate output from the overlap.
-    """
+    """Return complete, ordered decode windows."""
     validate_chunk_settings(chunk_seconds, context_seconds)
     if duration <= 0:
         return []
@@ -160,8 +166,6 @@ def finalize_segments(segments: list[dict]) -> list[dict]:
             previous_normalized = " ".join(_normalized_words(previous["text"]))
             current_normalized = " ".join(_normalized_words(current["text"]))
 
-            # The same segment can occasionally be returned by both overlapping
-            # windows. Keep one copy and retain its widest timestamp range.
             if (
                 current_normalized
                 and current_normalized == previous_normalized
@@ -190,18 +194,12 @@ def transcribe_in_chunks(
     sample_rate: int,
     requested_lang: str | None,
     beam_size: int,
+    initial_prompt: str | None = None,
     use_vad: bool = False,
     chunk_seconds: float = DEFAULT_CHUNK_SECONDS,
     context_seconds: float = DEFAULT_CHUNK_CONTEXT_SECONDS,
 ) -> tuple[list[dict], dict[str, float], int]:
-    """
-    Decode every part of an audio timeline in bounded overlapping windows.
-
-    Faster-Whisper normally advances through long files using predicted
-    timestamp tokens. A bad timestamp or repetition loop can move that cursor
-    forward by tens of seconds. Independent windows put a hard upper bound on
-    that failure and guarantee that the next window is still decoded.
-    """
+    """Decode audio in bounded overlapping windows with domain prompt guidance."""
     if sample_rate <= 0:
         raise ValueError("sample_rate must be greater than zero")
     if audio.ndim != 1:
@@ -217,15 +215,14 @@ def transcribe_in_chunks(
         language=requested_lang,
         task="transcribe",
         beam_size=max(1, int(beam_size)),
-        # Bounded chunks and n-gram blocking contain repetition without the
-        # expensive multi-temperature retry loop.
         temperature=0.0,
-        initial_prompt=None,
+        initial_prompt=initial_prompt,
         condition_on_previous_text=False,
         repetition_penalty=1.15,
         no_repeat_ngram_size=3,
         compression_ratio_threshold=2.4,
-        no_speech_threshold=0.75,
+        no_speech_threshold=0.80,
+        log_prob_threshold=-1.0,
         word_timestamps=True,
         hallucination_silence_threshold=2.0,
         vad_filter=use_vad,
@@ -233,9 +230,9 @@ def transcribe_in_chunks(
     if use_vad:
         transcribe_kwargs["vad_parameters"] = {
             "threshold": 0.35,
-            "min_speech_duration_ms": 100,
-            "min_silence_duration_ms": 1000,
-            "speech_pad_ms": 500,
+            "min_speech_duration_ms": 150,
+            "min_silence_duration_ms": 800,
+            "speech_pad_ms": 400,
         }
 
     for window_number, window in enumerate(windows, start=1):
@@ -505,6 +502,7 @@ def run_whisper_extraction(
     )
 
     requested_lang = SUPPORTED_LOCALES.get(src_lang.lower())
+    prompt = INITIAL_PROMPTS.get(src_lang.lower(), "") if requested_lang else ""
 
     print(
         f"🗣️ Transcribing language={src_lang.upper()} "
@@ -525,6 +523,7 @@ def run_whisper_extraction(
         sample_rate=sample_rate,
         requested_lang=requested_lang,
         beam_size=beam_size,
+        initial_prompt=prompt or None,
         use_vad=use_vad,
         chunk_seconds=chunk_seconds,
         context_seconds=chunk_context_seconds,
