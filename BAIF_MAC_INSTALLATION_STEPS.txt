@@ -1,0 +1,83 @@
+BAIF ANUWAD STUDIO - macOS INSTALLATION
+=======================================
+
+This guide is for a BAIF macOS development or backup machine. The application
+runs fully offline after installation.
+
+REQUIREMENTS
+------------
+- macOS with 16 GB RAM or more and 15 GB free storage
+- Python 3.12
+- FFmpeg on PATH (ffmpeg and ffprobe)
+- Application source and approved local_model_vault
+
+When internet is available, install prerequisites:
+
+brew install git python@3.12 ffmpeg
+git --version
+python3.12 --version
+ffmpeg -version
+ffprobe -version
+
+
+METHOD 1 - PREPARED PENDRIVE
+-----------------------------
+
+1. On a staging Mac with the same CPU architecture, copy a clean repository and
+   the approved local_model_vault to the pendrive. Exclude .venv, storage_vault,
+   Python caches, and user media.
+
+2. Download offline wheels to the pendrive:
+
+   python3.12 -m pip download --only-binary=:all: --dest /Volumes/BAIF_INSTALL/wheelhouse -r requirements.txt
+
+3. Include approved macOS installers for Python 3.12 and FFmpeg if the final
+   Mac cannot use Homebrew.
+
+4. Copy the application to ~/BAIF/baif-translation-engine, then run:
+
+   cd ~/BAIF/baif-translation-engine
+   python3.12 -m venv .venv
+   .venv/bin/python -m pip install --no-index --find-links /Volumes/BAIF_INSTALL/wheelhouse -r requirements.txt
+   .venv/bin/python -m pip check
+   .venv/bin/python verify_installation.py
+   .venv/bin/python verify_all_models.py
+
+
+METHOD 2 - ONE-TIME INTERNET SETUP
+----------------------------------
+
+git clone <REPO_URL> baif-translation-engine
+cd baif-translation-engine
+git checkout <BRANCH>
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip setuptools wheel
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements-setup.txt
+export BAIF_MODEL_REPO_ID="<MODEL_REPO_ID>"
+export HF_TOKEN="hf_your_read_token"
+.venv/bin/python download_production_models.py
+.venv/bin/python verify_installation.py
+.venv/bin/python verify_all_models.py
+unset HF_TOKEN
+unset BAIF_MODEL_REPO_ID
+
+Disconnect internet and process a new uncached file before handover.
+
+
+NORMAL DAILY STARTUP
+--------------------
+
+cd ~/BAIF/baif-translation-engine
+.venv/bin/python -m streamlit run app/web_ui.py
+
+Open http://localhost:8501. macOS uses caffeinate while a translation is active
+to prevent idle system sleep. Closing the laptop lid can still suspend work.
+
+FINAL HANDOVER CHECK
+--------------------
+Before accepting the installation, complete every applicable item in:
+
+INSTALLATION_CHECKLIST.md
+
+The checklist is in the same BAIF Anuwad Studio repository folder.

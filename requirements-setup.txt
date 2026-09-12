@@ -1,0 +1,4 @@
+# One-time internet-connected setup utilities only.
+# Needed only for download_production_models.py. Do not install or retain a
+# Hugging Face token on the final offline laptop after local_model_vault exists.
+huggingface_hub>=0.30,<2

@@ -1,13 +1,13 @@
+# BAIF Anuwad Studio — runtime dependencies only
+# Target: Python 3.12 x64 (Windows) or arm64/x64 (macOS).
+# These packages are required for normal offline translation. Build a matching
+# wheelhouse with this file when preparing the no-internet USB installation.
+
 streamlit==1.32.0
-fastapi==0.110.0
-uvicorn==0.28.0
-python-multipart==0.0.9
 faster-whisper==1.0.1
 ctranslate2==4.1.0
-huggingface_hub==0.21.4
+sentencepiece==0.2.0
 sherpa-onnx==1.13.4
 soundfile==0.12.1
-librosa==0.10.1
 srt==3.5.3
-openpyxl==3.1.2
 numpy==1.26.4

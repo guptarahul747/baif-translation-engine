@@ -1,0 +1,149 @@
+BAIF ANUWAD STUDIO - WINDOWS INSTALLATION AND HANDOVER
+======================================================
+
+This guide is for the final BAIF Windows laptop. The application runs fully
+offline after installation. Normal use does not require the internet, a cloud
+account, a Hugging Face token, or any HSBC system.
+
+FINAL LAPTOP REQUIREMENTS
+-------------------------
+- Windows 10/11 x64, 16 GB RAM or more, and 15 GB free storage
+- Python 3.12 x64
+- FFmpeg x64 on PATH (ffmpeg and ffprobe)
+- Microsoft Visual C++ 2015-2022 Redistributable x64
+- BAIF application source and approved local_model_vault
+
+
+METHOD 1 - PREPARED PENDRIVE (NO INTERNET ON FINAL LAPTOP)
+-----------------------------------------------------------
+
+A. PREPARE THE PENDRIVE ON A STAGING WINDOWS PC
+
+The staging PC must be Windows x64 with Python 3.12 x64. It may use internet
+once. Create this layout on the pendrive:
+
+BAIF_INSTALL/
+  baif-translation-engine/  application source and approved local_model_vault
+  wheelhouse/               offline Python package wheels
+  installers/               Python, FFmpeg, VC++ and optional Git installers
+
+1. Copy a clean application source folder to BAIF_INSTALL/baif-translation-engine.
+   Do NOT copy .venv, storage_vault, __pycache__, caches, or user media.
+
+2. Copy the approved and verified production vault to:
+   BAIF_INSTALL/baif-translation-engine/local_model_vault
+
+   The vault must contain Whisper, indictrans2/en-indic, indictrans2/indic-en,
+   and English/Hindi/Marathi TTS folders.
+
+3. Download all runtime wheels to the pendrive. Use the same Python version and
+   architecture as the final laptop. Replace E: with the pendrive letter:
+
+   py -3.12 -m pip download --only-binary=:all: --dest E:\BAIF_INSTALL\wheelhouse -r requirements.txt
+
+4. Put the Python 3.12 x64 installer, FFmpeg x64 package, and VC++ x64
+   Redistributable installer in BAIF_INSTALL/installers.
+
+B. INSTALL ON THE FINAL BAIF LAPTOP
+
+1. Copy the application folder from the pendrive to:
+   C:\BAIF\baif-translation-engine
+
+2. Install Python 3.12 x64, FFmpeg x64, and VC++ from the pendrive. Add the
+   FFmpeg bin directory to Windows PATH.
+
+3. Open a new PowerShell window and verify:
+
+   py -3.12 --version
+   ffmpeg -version
+   ffprobe -version
+
+4. Create the virtual environment and install ONLY from the pendrive:
+
+   Set-Location C:\BAIF\baif-translation-engine
+   py -3.12 -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install --no-index --find-links E:\BAIF_INSTALL\wheelhouse -r requirements.txt
+   .\.venv\Scripts\python.exe -m pip check
+
+5. Verify and start:
+
+   .\.venv\Scripts\python.exe verify_installation.py
+   .\.venv\Scripts\python.exe verify_all_models.py
+   .\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
+
+6. Open http://localhost:8501 and process one new short audio/video file as the
+   final acceptance test.
+
+
+METHOD 2 - ONE-TIME INTERNET SETUP
+----------------------------------
+
+1. Install BAIF-approved versions of Python 3.12 x64 (enable Add python.exe to
+   PATH), Git for Windows, FFmpeg x64, and VC++ x64. Add the FFmpeg bin folder
+   to PATH.
+
+2. Open a new PowerShell window and verify:
+
+   py -3.12 --version
+   git --version
+   ffmpeg -version
+   ffprobe -version
+
+3. Download the application and install packages:
+
+   New-Item -ItemType Directory -Force C:\BAIF | Out-Null
+   Set-Location C:\BAIF
+   git clone <REPO_URL> baif-translation-engine
+   Set-Location .\baif-translation-engine
+   git checkout <BRANCH>
+
+   py -3.12 -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   .\.venv\Scripts\python.exe -m pip install -r requirements-setup.txt
+   .\.venv\Scripts\python.exe -m pip check
+
+4. Download the approved model vault once, with a temporary read-only token:
+
+   $env:BAIF_MODEL_REPO_ID = "<MODEL_REPO_ID>"
+   $env:HF_TOKEN = "hf_your_read_token"
+   .\.venv\Scripts\python.exe download_production_models.py
+
+5. Verify and remove credentials:
+
+   .\.venv\Scripts\python.exe verify_installation.py
+   .\.venv\Scripts\python.exe verify_all_models.py
+   Remove-Item Env:HF_TOKEN -ErrorAction SilentlyContinue
+   Remove-Item Env:BAIF_MODEL_REPO_ID -ErrorAction SilentlyContinue
+
+6. Disconnect internet. Start the app and process a NEW UNCACHED file:
+
+   .\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
+
+If that works, the laptop is ready for offline BAIF use.
+
+
+NORMAL DAILY STARTUP
+--------------------
+
+Set-Location C:\BAIF\baif-translation-engine
+.\.venv\Scripts\python.exe -m streamlit run app\web_ui.py
+
+Open http://localhost:8501. Internet is not required.
+
+OPERATING NOTES
+---------------
+- Set Windows Sleep to Never when plugged in for production use.
+- Locking the screen should not stop processing. Sleep, hibernation, and closing
+  the laptop lid can pause local applications.
+- Never copy a .venv between machines; create it locally.
+- Never copy a previous storage_vault; it may contain user media and cache data.
+- Remove all Hugging Face tokens and credentials after handover.
+
+FINAL HANDOVER CHECK
+--------------------
+Before accepting the installation, complete every applicable item in:
+
+INSTALLATION_CHECKLIST.md
+
+The checklist is in the same BAIF Anuwad Studio repository folder.
